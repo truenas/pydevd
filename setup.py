@@ -32,24 +32,6 @@ class BinaryDistribution(Distribution):
     def is_pure(self):
         return False
 
-
-data_files = []
-
-
-def accept_file(f):
-    f = f.lower()
-    for ext in '.py .dll .so .dylib .txt .cpp .h .bat .c .sh .md .txt'.split():
-        if f.endswith(ext):
-            return True
-
-    return f in ['readme', 'makefile']
-
-
-data_files.append(('pydevd_attach_to_process', [os.path.join('pydevd_attach_to_process', f) for f in os.listdir('pydevd_attach_to_process') if accept_file(f)]))
-for root, dirs, files in os.walk("pydevd_attach_to_process"):
-    for d in dirs:
-        data_files.append((os.path.join(root, d), [os.path.join(root, d, f) for f in os.listdir(os.path.join(root, d)) if accept_file(f)]))
-
 import pydevd
 version = pydevd.__version__
 
@@ -117,7 +99,6 @@ args = dict(
             'pydevd = pydevd:main',
         ],
     },
-    data_files=data_files,
     keywords=['pydev', 'pydevd', 'pydev.debugger'],
     include_package_data=True,
     zip_safe=False,
