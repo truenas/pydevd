@@ -1,0 +1,5 @@
+pydevd (1.6.1+dfsg1-1) experimental; urgency=medium
+
+  * Initial release (Closes: #933070)
+
+ -- William Grzybowski <william@grzy.org>  Fri, 26 Jul 2019 07:39:23 -0300

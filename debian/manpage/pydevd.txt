@@ -1,0 +1,32 @@
+NAME
+  pydevd - Script to start pydevd debugger
+
+SYNOPSIS
+  pydevd --port N [--client hostname | --server] [--multiproc | --multiprocess ]
+           [--save-signatures] [--save-threading] [--save-asyncio]
+           [--print-in-debugger-startup] [--cmd-line] [--module] [--DEBUG]
+           --file filename
+
+DESCRIPTION
+  This script is meant to run pydevd on top of another Python script,
+  making it ready to be attached for remote debugging, connecting from
+  an IDE, such as PyDev or PyCharm).
+
+OPTIONS
+  --client hostname  hostname to connect
+  --server  run in server mode
+  --port N  port to connect (client) or listen (server)
+  --multiproc  reuses connection (used by PyCharm)
+  --multiprocess  creates new connection (used by PyDev)
+  --save-signatures  send signature call tracewait
+  --save-threading  use threading analyser
+  --save-asyncio  use asyncio analyser
+  --print-in-debugger-startup  print debugger startup with pid on stderr
+  --cmd-line  wait for commands
+  --module  set if the file is a module
+
+AUTHOR
+  pydevd was written by Fabio Zadrozny <fabiofz@gmail.com>.
+
+  This manual page was written by William Grzybowski <william@grzy.org> for the Debian
+  project (but may be used by others).

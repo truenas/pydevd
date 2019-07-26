@@ -1,0 +1,5 @@
+pydevd shared libraries
+-----------------------
+
+pydevd upstream tarball includes compiled shared libraries for x86 and amd_64
+which we have the source for and are not used in the module.
