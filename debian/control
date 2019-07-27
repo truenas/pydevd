@@ -29,7 +29,7 @@ Description: Script to start pydevd debugger
  an IDE, such as PyDev or PyCharm).
 
 Package: python3-pydevd
-Architecture: any
+Architecture: amd64 i386
 Depends: ${misc:Depends}, ${python3:Depends}, ${shlibs:Depends}
 Suggests: pydevd
 Description: Debugger used in PyDev, PyCharm and VSCode Python
