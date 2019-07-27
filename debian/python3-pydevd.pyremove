@@ -10,3 +10,4 @@ _pydev_imps/_pydev_pkgutil_old.py
 _pydevd_bundle/pydevconsole_code_for_ironpython.py
 _pydevd_bundle/pydevd_exec.py
 pydev_ipython/inputhookglut.py
+pydevd_attach_to_process/_check.py
