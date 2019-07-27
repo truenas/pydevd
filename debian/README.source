@@ -1,5 +1,10 @@
 pydevd shared libraries
 -----------------------
 
-pydevd upstream tarball includes compiled shared libraries for x86 and amd_64
-which we have the source for and are not used in the module.
+pydevd upstream tarball includes compiled shared libraries for x86 and amd64
+which we dont have the source for and are not used in the module.
+They also include jython/jar files without sources.
+
+For these reasons the upstream tarball has been repacked.
+
+-- William Grzybowski <william@grzy.org>  Sat, 27 Jul 2019 15:51:17 -0300
