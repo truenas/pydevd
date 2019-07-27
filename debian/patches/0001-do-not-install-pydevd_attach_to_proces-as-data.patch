@@ -1,6 +1,6 @@
 From: William Grzybowski <william@grzy.org>
 Date: Fri, 26 Jul 2019 08:43:03 -0300
-Subject: Do not install pydevd_attach_to_process
+Subject: Do not install pydevd_attach_to_process as data
 
 ---
  MANIFEST.in |  6 +++---
