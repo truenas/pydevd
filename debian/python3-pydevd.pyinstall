@@ -1,0 +1,2 @@
+pydevd_attach_to_process/*.py
+pydevd_attach_to_process/*.so
