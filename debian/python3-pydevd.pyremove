@@ -1,1 +1,12 @@
+# Unnecessary setup file being installed
 setup_cython.py
+# Unused Python 2 files, syntax error with Python 3
+_pydev_imps/_pydev_xmlrpclib.py
+_pydev_imps/_pydev_uuid_old.py
+_pydev_imps/_pydev_SocketServer.py
+_pydev_imps/_pydev_SimpleXMLRPCServer.py
+_pydev_imps/_pydev_inspect.py
+_pydev_imps/_pydev_pkgutil_old.py
+_pydevd_bundle/pydevconsole_code_for_ironpython.py
+_pydevd_bundle/pydevd_exec.py
+pydev_ipython/inputhookglut.py
