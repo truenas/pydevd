@@ -1,0 +1,33 @@
+From: William Grzybowski <william@grzy.org>
+Date: Sat, 27 Jul 2019 14:04:12 -0300
+Subject: remove non-existent modules
+
+---
+ tests/test_jyserver.py | 1 -
+ tests/test_pyserver.py | 1 -
+ 2 files changed, 2 deletions(-)
+
+diff --git a/tests/test_jyserver.py b/tests/test_jyserver.py
+index 7e7a9f5..36e78b8 100644
+--- a/tests/test_jyserver.py
++++ b/tests/test_jyserver.py
+@@ -6,7 +6,6 @@ import unittest
+ import socket
+ import urllib
+ import pytest
+-import pycompletionserver
+ 
+ 
+ IS_JYTHON = sys.platform.find('java') != -1
+diff --git a/tests/test_pyserver.py b/tests/test_pyserver.py
+index d7d8610..abe9519 100644
+--- a/tests/test_pyserver.py
++++ b/tests/test_pyserver.py
+@@ -19,7 +19,6 @@ except ImportError:
+ 
+ 
+ if not IS_JYTHON:
+-    import pycompletionserver
+     import socket
+     if not IS_PYTHON_3_ONWARDS:
+         from urllib import quote_plus, unquote_plus
