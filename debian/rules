@@ -2,10 +2,28 @@
 #export DH_VERBOSE = 1
 
 export PYBUILD_NAME=pydevd
+export PYBUILD_TEST_ARGS=-k '\
+	not test_jysimpleTipper and \
+	not test_jyserver and \
+	not test_pyserver \
+	'
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+CFLAGS:=$(shell dpkg-buildflags --get CFLAGS)
+CPPFLAGS:=$(shell dpkg-buildflags --get CPPFLAGS)
+LDFLAGS:=$(shell dpkg-buildflags --get LDFLAGS)
 
 %:
 	dh $@ --with python3 --buildsystem=pybuild
+
+override_dh_auto_build:
+	cd pydevd_attach_to_process/linux_and_mac && \
+		CFLAGS="$$CFLAGS" CPPFLAGS="$$CPPFLAGS" LDFLAGS="$$LDFLAGS" \
+		./compile_linux.sh
+	for PYTHON in $(shell pyversions -r) $(shell py3versions -r); do \
+		$$PYTHON setup_cython.py build_ext --inplace; \
+	done
+	dh_auto_build
 
 override_dh_auto_install:
 	dh_auto_install
@@ -13,3 +31,10 @@ override_dh_auto_install:
 		--package=pydevd \
 		--sourcedir=debian/python3-pydevd \
 		usr/bin
+
+override_dh_dwz:
+	dh_dwz -Xattach_linux
+
+override_dh_python3:
+	# attach_linux*.so should not be renamed
+	dh_python3 --no-ext-rename
