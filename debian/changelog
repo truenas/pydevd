@@ -1,4 +1,4 @@
-pydevd (1.6.1+dfsg1-1) experimental; urgency=medium
+pydevd (1.6.1+git20190712.1267523+dfsg-1) experimental; urgency=medium
 
   * Initial release (Closes: #933070)
 
