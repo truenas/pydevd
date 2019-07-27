@@ -8,7 +8,7 @@ Build-Depends: cython3,
                dh-python,
                libc6-dev-i386,
                g++-multilib,
-               python3-all,
+               python3-all-dev,
                python3-setuptools,
 # test
                python3-pytest
