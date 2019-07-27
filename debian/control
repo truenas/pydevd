@@ -6,8 +6,12 @@ Uploaders: William Grzybowski <william@grzy.org>
 Build-Depends: cython3,
                debhelper-compat (= 12),
                dh-python,
+               libc6-dev-i386,
+               g++-multilib,
                python3-all,
-               python3-setuptools
+               python3-setuptools,
+# test
+               python3-pytest
 Standards-Version: 4.4.0
 Homepage: https://github.com/fabioz/PyDev.Debugger/
 Vcs-Browser: https://salsa.debian.org/python-team/modules/pydevd
