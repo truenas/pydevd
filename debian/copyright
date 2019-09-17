@@ -1,6 +1,10 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: PyDev.Debugger
 Source: https://pypi.org/project/pydevd/
+Files-Excluded:
+  *.dll
+  *.dylib
+  *.so
 Comment: Repacked to remove shared libraries
 
 Files: *
