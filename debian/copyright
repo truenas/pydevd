@@ -5,7 +5,7 @@ Comment: Repacked to remove shared libraries
 
 Files: *
 Copyright: 2014-2019 Fabio Zadrozny <fabiofz@gmail.com>
-           ?         Brainwy Software Ltda.
+           Brainwy Software Ltda.
 License: EPL-1.0
 
 Files: _pydev_bundle/pydev_umd.py
@@ -17,7 +17,7 @@ Copyright: 2008-2013 IPython Development Team
 License: BSD-3-Clause
 
 Files: _pydevd_bundle/pydevd_safe_repr.py
-Copyright: ? Microsoft Corporation
+Copyright: Microsoft Corporation
 License: MIT
 
 Files: pydevd_attach_to_process/winappdbg/*
