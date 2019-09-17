@@ -1,2 +1,3 @@
 0001-do-not-install-pydevd_attach_to_proces-as-data.patch
 0002-Use-buildflags.patch
+0003-python3-print.patch

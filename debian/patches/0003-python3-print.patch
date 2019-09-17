@@ -1,0 +1,67 @@
+From: William Grzybowski <william@grzy.org>
+Date: Tue, 17 Sep 2019 12:31:42 -0300
+Subject: python3 print
+
+---
+ pydevd_attach_to_process/winappdbg/plugins/do_example.py     | 10 +++++-----
+ pydevd_attach_to_process/winappdbg/plugins/do_exchain.py     |  6 +++---
+ pydevd_attach_to_process/winappdbg/plugins/do_exploitable.py | 10 +++++-----
+ 3 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/pydevd_attach_to_process/winappdbg/plugins/do_example.py b/pydevd_attach_to_process/winappdbg/plugins/do_example.py
+index 591ce68..47ded2f 100644
+--- a/pydevd_attach_to_process/winappdbg/plugins/do_example.py
++++ b/pydevd_attach_to_process/winappdbg/plugins/do_example.py
+@@ -34,8 +34,8 @@ __revision__ = "$Id$"
+ 
+ def do(self, arg):
+     ".example - This is an example plugin for the command line debugger"
+-    print "This is an example command."
+-    print "%s.do(%r, %r):" % (__name__, self, arg)
+-    print "  last event", self.lastEvent
+-    print "  prefix", self.cmdprefix
+-    print "  arguments", self.split_tokens(arg)
++    print("This is an example command.")
++    print("%s.do(%r, %r):" % (__name__, self, arg))
++    print("  last event", self.lastEvent)
++    print("  prefix", self.cmdprefix)
++    print("  arguments", self.split_tokens(arg))
+diff --git a/pydevd_attach_to_process/winappdbg/plugins/do_exchain.py b/pydevd_attach_to_process/winappdbg/plugins/do_exchain.py
+index aa97fec..488f313 100644
+--- a/pydevd_attach_to_process/winappdbg/plugins/do_exchain.py
++++ b/pydevd_attach_to_process/winappdbg/plugins/do_exchain.py
+@@ -37,8 +37,8 @@ from winappdbg import HexDump, Table
+ def do(self, arg):
+     ".exchain - Show the SEH chain"
+     thread = self.get_thread_from_prefix()
+-    print "Exception handlers for thread %d" % thread.get_tid()
+-    print
++    print("Exception handlers for thread %d" % thread.get_tid())
++    print()
+     table = Table()
+     table.addRow("Block", "Function")
+     bits = thread.get_bits()
+@@ -48,4 +48,4 @@ def do(self, arg):
+         if seh_func is not None:
+             seh_func = HexDump.address(seh_func, bits)
+         table.addRow(seh, seh_func)
+-    print table.getOutput()
++    print(table.getOutput())
+diff --git a/pydevd_attach_to_process/winappdbg/plugins/do_exploitable.py b/pydevd_attach_to_process/winappdbg/plugins/do_exploitable.py
+index 64e93f6..3749556 100644
+--- a/pydevd_attach_to_process/winappdbg/plugins/do_exploitable.py
++++ b/pydevd_attach_to_process/winappdbg/plugins/do_exploitable.py
+@@ -43,8 +43,8 @@ def do(self, arg):
+ 
+     status, rule, description = crash.isExploitable()
+ 
+-    print "-" * 79
+-    print "Exploitability: %s" % status
+-    print "Matched rule:   %s" % rule
+-    print "Description:    %s" % description
+-    print "-" * 79
++    print("-" * 79)
++    print("Exploitability: %s" % status)
++    print("Matched rule:   %s" % rule)
++    print("Description:    %s" % description)
++    print("-" * 79)
