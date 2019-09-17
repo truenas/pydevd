@@ -4,6 +4,7 @@ Source: https://pypi.org/project/pydevd/
 Files-Excluded:
   *.dll
   *.dylib
+  *.jar
   *.so
 Comment: Repacked to remove shared libraries
 
