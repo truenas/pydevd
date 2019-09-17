@@ -21,12 +21,12 @@ index 4870aa7..279552c 100644
 -recursive-include _pydevd_bundle *.pyx *.cpp *.hpp
 -recursive-include build_tools *.py
 \ No newline at end of file
-+include *.rst *.txt *.md LICENSE
-+recursive-include pydevd_attach_to_process *.py *.so *.txt
-+recursive-include pydevd_attach_to_process/common *.py *.so *.txt
-+recursive-include pydevd_attach_to_process/linux_and_mac *.py *.so *.txt
-+recursive-include pydevd_attach_to_process/winappdbg *.py *.so *.txt
-+recursive-include pydevd_attach_to_process/windows *.py *.so *.txt
++include LICENSE
++recursive-include pydevd_attach_to_process *.py *.so
++recursive-include pydevd_attach_to_process/common *.py *.so
++recursive-include pydevd_attach_to_process/linux_and_mac *.py *.so
++recursive-include pydevd_attach_to_process/winappdbg *.py *.so
++recursive-include pydevd_attach_to_process/windows *.py *.so
 +recursive-include build_tools *.py
 diff --git a/setup.py b/setup.py
 index bdd4779..2c0a4a7 100644
