@@ -7,7 +7,7 @@ Subject: Use buildflags
  1 file changed, 3 insertions(+), 2 deletions(-)
 
 diff --git a/pydevd_attach_to_process/linux_and_mac/compile_linux.sh b/pydevd_attach_to_process/linux_and_mac/compile_linux.sh
-index 3a1ebc2..cfa951b 100755
+index 3a1ebc2..cfa951b 100644
 --- a/pydevd_attach_to_process/linux_and_mac/compile_linux.sh
 +++ b/pydevd_attach_to_process/linux_and_mac/compile_linux.sh
 @@ -1,9 +1,10 @@
