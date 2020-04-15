@@ -1,9 +1,10 @@
 from _pydev_bundle.pydev_is_thread_alive import is_thread_alive
-from _pydev_imps._pydev_saved_modules import threading
-from _pydevd_bundle.pydevd_constants import get_current_thread_id, IS_IRONPYTHON, NO_FTRACE
-from _pydevd_bundle.pydevd_kill_all_pydevd_threads import kill_all_pydev_threads
-from pydevd_file_utils import get_abs_path_real_path_and_base_from_frame, NORM_PATHS_AND_BASE_CONTAINER
 from _pydev_bundle.pydev_log import exception as pydev_log_exception
+from _pydev_imps._pydev_saved_modules import threading
+from _pydevd_bundle.pydevd_constants import (get_current_thread_id, NO_FTRACE,
+    USE_CUSTOM_SYS_CURRENT_FRAMES_MAP, ForkSafeLock)
+from pydevd_file_utils import get_abs_path_real_path_and_base_from_frame, NORM_PATHS_AND_BASE_CONTAINER
+
 # IFDEF CYTHON
 # from cpython.object cimport PyObject
 # from cpython.ref cimport Py_INCREF, Py_XDECREF
@@ -33,7 +34,7 @@ global_cache_skips = {}
 global_cache_frame_skips = {}
 
 _global_notify_skipped_step_in = False
-_global_notify_skipped_step_in_lock = threading.Lock()
+_global_notify_skipped_step_in_lock = ForkSafeLock()
 
 
 def notify_skipped_step_in_because_of_filters(py_db, frame):
@@ -380,31 +381,20 @@ class ThreadTracer(object):
         # DEBUG = 'code_to_debug' in frame.f_code.co_filename
         # if DEBUG: print('ENTER: trace_dispatch: %s %s %s %s' % (frame.f_code.co_filename, frame.f_lineno, event, frame.f_code.co_name))
         py_db, t, additional_info, cache_skips, frame_skips_cache = self._args
-        pydev_step_cmd = additional_info.pydev_step_cmd
-        is_stepping = pydev_step_cmd != -1
+        if additional_info.is_tracing:
+            return None if event == 'call' else NO_FTRACE  # we don't wan't to trace code invoked from pydevd_frame.trace_dispatch
 
+        additional_info.is_tracing += 1
         try:
-            if py_db._finish_debugging_session:
-                if not py_db._termination_event_set:
-                    # that was not working very well because jython gave some socket errors
-                    try:
-                        if py_db.output_checker_thread is None:
-                            kill_all_pydev_threads()
-                    except:
-                        pydev_log_exception()
-                    py_db._termination_event_set = True
+            pydev_step_cmd = additional_info.pydev_step_cmd
+            is_stepping = pydev_step_cmd != -1
+            if py_db.pydb_disposed:
                 return None if event == 'call' else NO_FTRACE
 
             # if thread is not alive, cancel trace_dispatch processing
             if not is_thread_alive(t):
                 py_db.notify_thread_not_alive(get_current_thread_id(t))
                 return None if event == 'call' else NO_FTRACE
-
-            if py_db.thread_analyser is not None:
-                py_db.thread_analyser.log_event(frame)
-
-            if py_db.asyncio_analyser is not None:
-                py_db.asyncio_analyser.log_event(frame)
 
             # Note: it's important that the context name is also given because we may hit something once
             # in the global context and another in the local context.
@@ -472,8 +462,6 @@ class ThreadTracer(object):
                         return None if event == 'call' else NO_FTRACE
 
             # if DEBUG: print('trace_dispatch', filename, frame.f_lineno, event, frame.f_code.co_name, file_type)
-            if additional_info.is_tracing:
-                return None if event == 'call' else NO_FTRACE  # we don't wan't to trace code invoked from pydevd_frame.trace_dispatch
 
             # Just create PyDBFrame directly (removed support for Python versions < 2.5, which required keeping a weak
             # reference to the frame).
@@ -499,7 +487,7 @@ class ThreadTracer(object):
             return None if event == 'call' else NO_FTRACE
 
         except Exception:
-            if py_db._finish_debugging_session:
+            if py_db.pydb_disposed:
                 return None if event == 'call' else NO_FTRACE  # Don't log errors when we're shutting down.
             # Log it
             try:
@@ -511,9 +499,11 @@ class ThreadTracer(object):
                 # (https://github.com/fabioz/PyDev.Debugger/issues/8)
                 pass
             return None if event == 'call' else NO_FTRACE
+        finally:
+            additional_info.is_tracing -= 1
 
 
-if IS_IRONPYTHON:
+if USE_CUSTOM_SYS_CURRENT_FRAMES_MAP:
     # This is far from ideal, as we'll leak frames (we'll always have the last created frame, not really
     # the last topmost frame saved -- this should be Ok for our usage, but it may leak frames and things
     # may live longer... as IronPython is garbage-collected, things should live longer anyways, so, it

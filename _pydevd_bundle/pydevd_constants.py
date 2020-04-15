@@ -3,6 +3,7 @@ This module holds the constants used for specifying the states of the debugger.
 '''
 from __future__ import nested_scopes
 import platform
+import weakref
 
 STATE_RUN = 1
 STATE_SUSPEND = 2
@@ -18,6 +19,11 @@ except NameError:
 
 import sys  # Note: the sys import must be here anyways (others depend on it)
 
+# Preload codecs to avoid imports to them later on which can potentially halt the debugger.
+import codecs as _codecs
+for _codec in ["ascii", "utf8", "utf-8", "latin1", "latin-1", "idna"]:
+    _codecs.lookup(_codec)
+
 
 class DebugInfoHolder:
     # we have to put it here because it can be set through the command line (so, the
@@ -25,11 +31,12 @@ class DebugInfoHolder:
 
     # General information
     DEBUG_TRACE_LEVEL = 0  # 0 = critical, 1 = info, 2 = debug, 3 = verbose
-    DEBUG_STREAM = sys.stderr
 
     # Flags to debug specific points of the code.
     DEBUG_RECORD_SOCKET_READS = False
     DEBUG_TRACE_BREAKPOINTS = -1
+
+    PYDEVD_DEBUG_FILE = None
 
 
 IS_CPYTHON = platform.python_implementation() == 'CPython'
@@ -72,11 +79,16 @@ IS_64BIT_PROCESS = sys.maxsize > (2 ** 32)
 IS_JYTHON = pydevd_vm_type.get_vm_type() == pydevd_vm_type.PydevdVmType.JYTHON
 IS_JYTH_LESS25 = False
 
+IS_PYPY = platform.python_implementation() == 'PyPy'
+
 if IS_JYTHON:
     import java.lang.System  # @UnresolvedImport
     IS_WINDOWS = java.lang.System.getProperty("os.name").lower().startswith("windows")
     if sys.version_info[0] == 2 and sys.version_info[1] < 5:
         IS_JYTH_LESS25 = True
+
+USE_CUSTOM_SYS_CURRENT_FRAMES = not hasattr(sys, '_current_frames') or IS_PYPY
+USE_CUSTOM_SYS_CURRENT_FRAMES_MAP = USE_CUSTOM_SYS_CURRENT_FRAMES and (IS_PYPY or IS_IRONPYTHON)
 
 IS_PYTHON_STACKLESS = "stackless" in sys.version.lower()
 CYTHON_SUPPORTED = False
@@ -104,6 +116,7 @@ IS_PY3K = False
 IS_PY34_OR_GREATER = False
 IS_PY36_OR_GREATER = False
 IS_PY37_OR_GREATER = False
+IS_PY38_OR_GREATER = False
 IS_PY2 = True
 IS_PY27 = False
 IS_PY24 = False
@@ -114,6 +127,7 @@ try:
         IS_PY34_OR_GREATER = sys.version_info >= (3, 4)
         IS_PY36_OR_GREATER = sys.version_info >= (3, 6)
         IS_PY37_OR_GREATER = sys.version_info >= (3, 7)
+        IS_PY38_OR_GREATER = sys.version_info >= (3, 8)
     elif sys.version_info[0] == 2 and sys.version_info[1] == 7:
         IS_PY27 = True
     elif sys.version_info[0] == 2 and sys.version_info[1] == 4:
@@ -158,7 +172,6 @@ ASYNC_EVAL_TIMEOUT_SEC = 60
 NEXT_VALUE_SEPARATOR = "__pydev_val__"
 BUILTINS_MODULE_NAME = '__builtin__' if IS_PY2 else 'builtins'
 SHOW_DEBUG_INFO_ENV = os.getenv('PYCHARM_DEBUG') == 'True' or os.getenv('PYDEV_DEBUG') == 'True' or os.getenv('PYDEVD_DEBUG') == 'True'
-PYDEVD_DEBUG_FILE = os.getenv('PYDEVD_DEBUG_FILE')
 
 if SHOW_DEBUG_INFO_ENV:
     # show debug info before the debugger start
@@ -166,8 +179,7 @@ if SHOW_DEBUG_INFO_ENV:
     DebugInfoHolder.DEBUG_TRACE_LEVEL = 3
     DebugInfoHolder.DEBUG_TRACE_BREAKPOINTS = 1
 
-    if PYDEVD_DEBUG_FILE:
-        DebugInfoHolder.DEBUG_STREAM = open(PYDEVD_DEBUG_FILE, 'w')
+DebugInfoHolder.PYDEVD_DEBUG_FILE = os.getenv('PYDEVD_DEBUG_FILE')
 
 
 def protect_libraries_from_patching():
@@ -202,8 +214,82 @@ def protect_libraries_from_patching():
 if USE_LIB_COPY:
     protect_libraries_from_patching()
 
-from _pydev_imps._pydev_saved_modules import thread
-_thread_id_lock = thread.allocate_lock()
+from _pydev_imps._pydev_saved_modules import thread, threading
+
+_fork_safe_locks = []
+
+if IS_JYTHON:
+
+    def ForkSafeLock(rlock=False):
+        if rlock:
+            return threading.RLock()
+        else:
+            return threading.Lock()
+
+else:
+
+    class ForkSafeLock(object):
+        '''
+        A lock which is fork-safe (when a fork is done, `pydevd_constants.after_fork()`
+        should be called to reset the locks in the new process to avoid deadlocks
+        from a lock which was locked during the fork).
+
+        Note:
+            Unlike `threading.Lock` this class is not completely atomic, so, doing:
+
+            lock = ForkSafeLock()
+            with lock:
+                ...
+
+            is different than using `threading.Lock` directly because the tracing may
+            find an additional function call on `__enter__` and on `__exit__`, so, it's
+            not recommended to use this in all places, only where the forking may be important
+            (so, for instance, the locks on PyDB should not be changed to this lock because
+            of that -- and those should all be collected in the new process because PyDB itself
+            should be completely cleared anyways).
+
+            It's possible to overcome this limitation by using `ForkSafeLock.acquire` and
+            `ForkSafeLock.release` instead of the context manager (as acquire/release are
+            bound to the original implementation, whereas __enter__/__exit__ is not due to Python
+            limitations).
+        '''
+
+        def __init__(self, rlock=False):
+            self._rlock = rlock
+            self._init()
+            _fork_safe_locks.append(weakref.ref(self))
+
+        def __enter__(self):
+            return self._lock.__enter__()
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return self._lock.__exit__(exc_type, exc_val, exc_tb)
+
+        def _init(self):
+            if self._rlock:
+                self._lock = threading.RLock()
+            else:
+                self._lock = thread.allocate_lock()
+
+            self.acquire = self._lock.acquire
+            self.release = self._lock.release
+            _fork_safe_locks.append(weakref.ref(self))
+
+
+def after_fork():
+    '''
+    Must be called after a fork operation (will reset the ForkSafeLock).
+    '''
+    global _fork_safe_locks
+    locks = _fork_safe_locks[:]
+    _fork_safe_locks = []
+    for lock in locks:
+        lock = lock()
+        if lock is not None:
+            lock._init()
+
+
+_thread_id_lock = ForkSafeLock()
 thread_get_ident = thread.get_ident
 
 if IS_PY3K:
@@ -500,19 +586,23 @@ def call_only_once(func):
 # Protocol where each line is a new message (text is quoted to prevent new lines).
 # payload is xml
 QUOTED_LINE_PROTOCOL = 'quoted-line'
+ARGUMENT_QUOTED_LINE_PROTOCOL = 'protocol-quoted-line'
 
 # Uses http protocol to provide a new message.
 # i.e.: Content-Length:xxx\r\n\r\npayload
 # payload is xml
 HTTP_PROTOCOL = 'http'
+ARGUMENT_HTTP_PROTOCOL = 'protocol-http'
 
 # Message is sent without any header.
 # payload is json
 JSON_PROTOCOL = 'json'
+ARGUMENT_JSON_PROTOCOL = 'json-dap'
 
 # Same header as the HTTP_PROTOCOL
 # payload is json
 HTTP_JSON_PROTOCOL = 'http_json'
+ARGUMENT_HTTP_JSON_PROTOCOL = 'json-dap-http'
 
 
 class _GlobalSettings:

@@ -1,19 +1,18 @@
 # coding: utf-8
 from contextlib import contextmanager
 import os
-import threading
 
 import pytest
 
 from tests_python import debugger_unittest
 from tests_python.debugger_unittest import (get_free_port, overrides, IS_CPYTHON, IS_JYTHON, IS_IRONPYTHON,
-    IS_PY3K, CMD_ADD_DJANGO_EXCEPTION_BREAK, CMD_REMOVE_DJANGO_EXCEPTION_BREAK,
-    CMD_ADD_EXCEPTION_BREAK, wait_for_condition)
+    CMD_ADD_DJANGO_EXCEPTION_BREAK, CMD_REMOVE_DJANGO_EXCEPTION_BREAK,
+    CMD_ADD_EXCEPTION_BREAK, wait_for_condition, IS_PYPY)
 from tests_python.debug_constants import IS_PY2
 from _pydevd_bundle.pydevd_comm_constants import file_system_encoding
 
 import sys
-import time
+from _pydevd_bundle.pydevd_constants import IS_WINDOWS
 
 
 def get_java_location():
@@ -134,38 +133,8 @@ class AbstractWriterThreadCaseFlask(debugger_unittest.AbstractWriterThread):
         return False
 
     def create_request_thread(self, url=''):
-        outer = self
-
-        class T(threading.Thread):
-
-            def wait_for_contents(self):
-                for _ in range(10):
-                    if hasattr(self, 'contents'):
-                        break
-                    time.sleep(.3)
-                else:
-                    raise AssertionError('Django did not return contents properly!')
-                return self.contents
-
-            def run(self):
-                try:
-                    from urllib.request import urlopen
-                except ImportError:
-                    from urllib import urlopen
-                for _ in range(10):
-                    try:
-                        stream = urlopen('http://127.0.0.1:%s%s' % (outer.flask_port, url))
-                        contents = stream.read()
-                        if IS_PY3K:
-                            contents = contents.decode('utf-8')
-                        self.contents = contents
-                        break
-                    except IOError:
-                        continue
-
-        t = T()
-        t.daemon = True
-        return t
+        return debugger_unittest.AbstractWriterThread.create_request_thread(
+            self, 'http://127.0.0.1:%s%s' % (self.flask_port, url))
 
 
 class AbstractWriterThreadCaseDjango(debugger_unittest.AbstractWriterThread):
@@ -211,39 +180,9 @@ class AbstractWriterThreadCaseDjango(debugger_unittest.AbstractWriterThread):
     def write_remove_exception_breakpoint_django(self, exception='Exception'):
         self.write('%s\t%s\t%s' % (CMD_REMOVE_DJANGO_EXCEPTION_BREAK, self.next_seq(), exception))
 
-    def create_request_thread(self, uri):
-        outer = self
-
-        class T(threading.Thread):
-
-            def wait_for_contents(self):
-                for _ in range(10):
-                    if hasattr(self, 'contents'):
-                        break
-                    time.sleep(.3)
-                else:
-                    raise AssertionError('Django did not return contents properly!')
-                return self.contents
-
-            def run(self):
-                try:
-                    from urllib.request import urlopen
-                except ImportError:
-                    from urllib import urlopen
-                for _ in range(10):
-                    try:
-                        stream = urlopen('http://127.0.0.1:%s/%s' % (outer.django_port, uri))
-                        contents = stream.read()
-                        if IS_PY3K:
-                            contents = contents.decode('utf-8')
-                        self.contents = contents
-                        break
-                    except IOError:
-                        continue
-
-        t = T()
-        t.daemon = True
-        return t
+    def create_request_thread(self, url=''):
+        return debugger_unittest.AbstractWriterThread.create_request_thread(
+            self, 'http://127.0.0.1:%s/%s' % (self.django_port, url))
 
 
 class DebuggerRunnerSimple(debugger_unittest.DebuggerRunner):
@@ -262,7 +201,7 @@ class DebuggerRunnerSimple(debugger_unittest.DebuggerRunner):
                     'org.python.util.jython'
                 ]
 
-        if IS_CPYTHON:
+        if IS_CPYTHON or IS_PYPY:
             return [sys.executable, '-u']
 
         if IS_IRONPYTHON:
@@ -288,9 +227,18 @@ class DebuggerRunnerRemote(debugger_unittest.DebuggerRunner):
 
 
 @pytest.fixture
-def case_setup(tmpdir):
+def debugger_runner_simple(tmpdir):
+    return DebuggerRunnerSimple(tmpdir)
 
-    runner = DebuggerRunnerSimple()
+
+@pytest.fixture
+def debugger_runner_remote(tmpdir):
+    return DebuggerRunnerRemote(tmpdir)
+
+
+@pytest.fixture
+def case_setup(tmpdir, debugger_runner_simple):
+    runner = debugger_runner_simple
 
     class WriterThread(debugger_unittest.AbstractWriterThread):
         pass
@@ -298,7 +246,11 @@ def case_setup(tmpdir):
     class CaseSetup(object):
 
         check_non_ascii = False
-        NON_ASCII_CHARS = u'áéíóú汉字'
+        if IS_PY2 and IS_WINDOWS:
+            # Py2 has some issues converting the non latin1 chars to bytes in windows.
+            NON_ASCII_CHARS = u'áéíóú'
+        else:
+            NON_ASCII_CHARS = u'áéíóú汉字'
 
         @contextmanager
         def test_file(
@@ -361,9 +313,7 @@ def case_setup_unhandled_exceptions(case_setup):
 
 
 @pytest.fixture
-def case_setup_remote():
-
-    runner = DebuggerRunnerRemote()
+def case_setup_remote(debugger_runner_remote):
 
     class WriterThread(debugger_unittest.AbstractWriterThread):
         pass
@@ -375,6 +325,9 @@ def case_setup_remote():
                 self,
                 filename,
                 wait_for_port=True,
+                access_token=None,
+                client_access_token=None,
+                append_command_line_args=(),
                 **kwargs
             ):
 
@@ -382,6 +335,15 @@ def case_setup_remote():
                 ret = debugger_unittest.AbstractWriterThread.update_command_line_args(writer, args)
                 wait_for_condition(lambda: hasattr(writer, 'port'))
                 ret.append(str(writer.port))
+
+                if access_token is not None:
+                    ret.append('--access-token')
+                    ret.append(access_token)
+                if client_access_token is not None:
+                    ret.append('--client-access-token')
+                    ret.append(client_access_token)
+
+                ret.extend(append_command_line_args)
                 return ret
 
             WriterThread.TEST_FILE = debugger_unittest._get_debugger_test_file(filename)
@@ -390,21 +352,19 @@ def case_setup_remote():
                 assert hasattr(WriterThread, key)
                 setattr(WriterThread, key, value)
 
-            with runner.check_case(WriterThread, wait_for_port=wait_for_port) as writer:
+            with debugger_runner_remote.check_case(WriterThread, wait_for_port=wait_for_port) as writer:
                 yield writer
 
     return CaseSetup()
 
 
 @pytest.fixture
-def case_setup_remote_attach_to():
+def case_setup_remote_attach_to(debugger_runner_remote):
     '''
     The difference from this to case_setup_remote is that this one will connect to a server
     socket started by the debugger and case_setup_remote will create the server socket and wait
     for a connection from the debugger.
     '''
-
-    runner = DebuggerRunnerRemote()
 
     class WriterThread(debugger_unittest.AbstractWriterThread):
 
@@ -435,16 +395,14 @@ def case_setup_remote_attach_to():
                 assert hasattr(WriterThread, key)
                 setattr(WriterThread, key, value)
 
-            with runner.check_case(WriterThread, wait_for_port=False) as writer:
+            with debugger_runner_remote.check_case(WriterThread, wait_for_port=False) as writer:
                 yield writer
 
     return CaseSetup()
 
 
 @pytest.fixture
-def case_setup_multiprocessing():
-
-    runner = DebuggerRunnerSimple()
+def case_setup_multiprocessing(debugger_runner_simple):
 
     class WriterThread(debugger_unittest.AbstractWriterThread):
         pass
@@ -469,16 +427,14 @@ def case_setup_multiprocessing():
                 assert hasattr(WriterThread, key)
                 setattr(WriterThread, key, value)
 
-            with runner.check_case(WriterThread) as writer:
+            with debugger_runner_simple.check_case(WriterThread) as writer:
                 yield writer
 
     return CaseSetup()
 
 
 @pytest.fixture
-def case_setup_m_switch():
-
-    runner = DebuggerRunnerSimple()
+def case_setup_m_switch(debugger_runner_simple):
 
     class WriterThread(_WriterThreadCaseMSwitch):
         pass
@@ -490,16 +446,16 @@ def case_setup_m_switch():
             for key, value in kwargs.items():
                 assert hasattr(WriterThread, key)
                 setattr(WriterThread, key, value)
-            with runner.check_case(WriterThread) as writer:
+            with debugger_runner_simple.check_case(WriterThread) as writer:
                 yield writer
 
     return CaseSetup()
 
 
 @pytest.fixture
-def case_setup_m_switch_entry_point():
+def case_setup_m_switch_entry_point(debugger_runner_simple):
 
-    runner = DebuggerRunnerSimple()
+    runner = debugger_runner_simple
 
     class WriterThread(_WriterThreadCaseModuleWithEntryPoint):
         pass
@@ -518,9 +474,7 @@ def case_setup_m_switch_entry_point():
 
 
 @pytest.fixture
-def case_setup_django():
-
-    runner = DebuggerRunnerSimple()
+def case_setup_django(debugger_runner_simple):
 
     class WriterThread(AbstractWriterThreadCaseDjango):
         pass
@@ -533,26 +487,24 @@ def case_setup_django():
             version = [int(x) for x in django.get_version().split('.')][:2]
             if version == [1, 7]:
                 django_folder = 'my_django_proj_17'
-            elif version in ([2, 1], [2, 2]):
+            elif version in ([2, 1], [2, 2], [3, 0]):
                 django_folder = 'my_django_proj_21'
             else:
-                raise AssertionError('Can only check django 1.7, 2.1 and 2.2 right now. Found: %s' % (version,))
+                raise AssertionError('Can only check django 1.7, 2.1, 2.2 and 3.0 right now. Found: %s' % (version,))
 
             WriterThread.DJANGO_FOLDER = django_folder
             for key, value in kwargs.items():
                 assert hasattr(WriterThread, key)
                 setattr(WriterThread, key, value)
 
-            with runner.check_case(WriterThread) as writer:
+            with debugger_runner_simple.check_case(WriterThread) as writer:
                 yield writer
 
     return CaseSetup()
 
 
 @pytest.fixture
-def case_setup_flask():
-
-    runner = DebuggerRunnerSimple()
+def case_setup_flask(debugger_runner_simple):
 
     class WriterThread(AbstractWriterThreadCaseFlask):
         pass
@@ -566,7 +518,7 @@ def case_setup_flask():
                 assert hasattr(WriterThread, key)
                 setattr(WriterThread, key, value)
 
-            with runner.check_case(WriterThread) as writer:
+            with debugger_runner_simple.check_case(WriterThread) as writer:
                 yield writer
 
     return CaseSetup()

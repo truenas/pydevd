@@ -12,21 +12,24 @@ from _pydevd_bundle._debug_adapter import pydevd_base_schema, pydevd_schema
 from _pydevd_bundle._debug_adapter.pydevd_schema import (
     CompletionsResponseBody, EvaluateResponseBody, ExceptionOptions,
     GotoTargetsResponseBody, ModulesResponseBody, ProcessEventBody,
-	ProcessEvent, Scope, ScopesResponseBody, SetExpressionResponseBody,
-	SetVariableResponseBody, SourceBreakpoint, SourceResponseBody,
-	VariablesResponseBody, SetBreakpointsResponseBody)
+    ProcessEvent, Scope, ScopesResponseBody, SetExpressionResponseBody,
+    SetVariableResponseBody, SourceBreakpoint, SourceResponseBody,
+    VariablesResponseBody, SetBreakpointsResponseBody, Response,
+    Capabilities, PydevdAuthorizeRequest)
 from _pydevd_bundle.pydevd_api import PyDevdAPI
 from _pydevd_bundle.pydevd_breakpoints import get_exception_class
 from _pydevd_bundle.pydevd_comm_constants import (
     CMD_PROCESS_EVENT, CMD_RETURN, CMD_SET_NEXT_STATEMENT, CMD_STEP_INTO,
-	CMD_STEP_INTO_MY_CODE, CMD_STEP_OVER, CMD_STEP_OVER_MY_CODE, file_system_encoding,
+    CMD_STEP_INTO_MY_CODE, CMD_STEP_OVER, CMD_STEP_OVER_MY_CODE, file_system_encoding,
     CMD_STEP_RETURN_MY_CODE, CMD_STEP_RETURN)
 from _pydevd_bundle.pydevd_filtering import ExcludeFilter
-from _pydevd_bundle.pydevd_json_debug_options import _extract_debug_options
+from _pydevd_bundle.pydevd_json_debug_options import _extract_debug_options, DebugOptions
 from _pydevd_bundle.pydevd_net_command import NetCommand
 from _pydevd_bundle.pydevd_utils import convert_dap_log_message_to_expression
 from _pydevd_bundle.pydevd_constants import (PY_IMPL_NAME, DebugInfoHolder, PY_VERSION_STR,
     PY_IMPL_VERSION_STR, IS_64BIT_PROCESS)
+from _pydevd_bundle.pydevd_trace_dispatch import USING_CYTHON
+from _pydevd_frame_eval.pydevd_frame_eval_main import USING_FRAME_EVAL
 
 
 def _convert_rules_to_exclude_filters(rules, filename_to_server, on_error):
@@ -109,12 +112,12 @@ class IDMap(object):
         return key
 
 
-class _PyDevJsonCommandProcessor(object):
+class PyDevJsonCommandProcessor(object):
 
     def __init__(self, from_json):
         self.from_json = from_json
         self.api = PyDevdAPI()
-        self._debug_options = {}
+        self._options = DebugOptions()
         self._next_breakpoint_id = partial(next, itertools.count(0))
         self._goto_targets_map = IDMap()
         self._launch_or_attach_request_done = False
@@ -154,16 +157,87 @@ class _PyDevJsonCommandProcessor(object):
             method_name = 'on_%s_request' % (request.command.lower(),)
             on_request = getattr(self, method_name, None)
             if on_request is None:
-                print('Unhandled: %s not available in _PyDevJsonCommandProcessor.\n' % (method_name,))
+                print('Unhandled: %s not available in PyDevJsonCommandProcessor.\n' % (method_name,))
                 return
 
             if DEBUG:
-                print('Handled in pydevd: %s (in _PyDevJsonCommandProcessor).\n' % (method_name,))
+                print('Handled in pydevd: %s (in PyDevJsonCommandProcessor).\n' % (method_name,))
 
         with py_db._main_lock:
+            if request.__class__ == PydevdAuthorizeRequest:
+                authorize_request = request  # : :type authorize_request: PydevdAuthorizeRequest
+                access_token = authorize_request.arguments.debugServerAccessToken
+                py_db.authentication.login(access_token)
+
+            if not py_db.authentication.is_authenticated():
+                response = Response(
+                    request.seq, success=False, command=request.command, message='Client not authenticated.', body={})
+                cmd = NetCommand(CMD_RETURN, 0, response, is_json=True)
+                py_db.writer.add_command(cmd)
+                return
+
             cmd = on_request(py_db, request)
             if cmd is not None and send_response:
                 py_db.writer.add_command(cmd)
+
+    def on_pydevdauthorize_request(self, py_db, request):
+        client_access_token = py_db.authentication.client_access_token
+        body = {'clientAccessToken': None}
+        if client_access_token:
+            body['clientAccessToken'] = client_access_token
+
+        response = pydevd_base_schema.build_response(request, kwargs={'body': body})
+        return NetCommand(CMD_RETURN, 0, response, is_json=True)
+
+    def on_initialize_request(self, py_db, request):
+        body = Capabilities(
+            # Supported.
+            supportsConfigurationDoneRequest=True,
+            supportsConditionalBreakpoints=True,
+            supportsHitConditionalBreakpoints=True,
+            supportsEvaluateForHovers=True,
+            supportsSetVariable=True,
+            supportsGotoTargetsRequest=True,
+            supportsCompletionsRequest=True,
+            supportsModulesRequest=True,
+            supportsExceptionOptions=True,
+            supportsValueFormattingOptions=True,
+            supportsExceptionInfoRequest=True,
+            supportTerminateDebuggee=True,
+            supportsDelayedStackTraceLoading=True,
+            supportsLogPoints=True,
+            supportsSetExpression=True,
+            supportsTerminateRequest=True,
+
+            exceptionBreakpointFilters=[
+                {'filter': 'raised', 'label': 'Raised Exceptions', 'default': False},
+                {'filter': 'uncaught', 'label': 'Uncaught Exceptions', 'default': True},
+            ],
+
+            # Not supported.
+            supportsFunctionBreakpoints=False,
+            supportsStepBack=False,
+            supportsRestartFrame=False,
+            supportsStepInTargetsRequest=False,
+            supportsRestartRequest=False,
+            supportsLoadedSourcesRequest=False,
+            supportsTerminateThreadsRequest=False,
+            supportsDataBreakpoints=False,
+            supportsReadMemoryRequest=False,
+            supportsDisassembleRequest=False,
+            additionalModuleColumns=[],
+            completionTriggerCharacters=[],
+            supportedChecksumAlgorithms=[],
+        ).to_dict()
+
+        # Non-standard capabilities/info below.
+        body['supportsDebuggerProperties'] = True
+
+        body['pydevd'] = pydevd_info = {}
+        pydevd_info['processId'] = os.getpid()
+        self.api.notify_initialize(py_db)
+        response = pydevd_base_schema.build_response(request, kwargs={'body': body})
+        return NetCommand(CMD_RETURN, 0, response, is_json=True)
 
     def on_configurationdone_request(self, py_db, request):
         '''
@@ -183,6 +257,17 @@ class _PyDevJsonCommandProcessor(object):
         :param ThreadsRequest request:
         '''
         return self.api.list_threads(py_db, request.seq)
+
+    def on_terminate_request(self, py_db, request):
+        '''
+        :param TerminateRequest request:
+        '''
+        self._request_terminate_process(py_db)
+        response = pydevd_base_schema.build_response(request)
+        return NetCommand(CMD_RETURN, 0, response, is_json=True)
+
+    def _request_terminate_process(self, py_db):
+        self.api.request_terminate_process(py_db)
 
     def on_completions_request(self, py_db, request):
         '''
@@ -229,6 +314,9 @@ class _PyDevJsonCommandProcessor(object):
         stepping_resumes_all_threads = args.get('steppingResumesAllThreads', True)
         self.api.set_stepping_resumes_all_threads(py_db, stepping_resumes_all_threads)
 
+        terminate_child_processes = args.get('terminateChildProcesses', True)
+        self.api.set_terminate_child_processes(py_db, terminate_child_processes)
+
         exclude_filters = []
 
         if rules is not None:
@@ -237,14 +325,14 @@ class _PyDevJsonCommandProcessor(object):
 
         self.api.set_exclude_filters(py_db, exclude_filters)
 
-        self._debug_options = _extract_debug_options(
+        debug_options = _extract_debug_options(
             args.get('options'),
             args.get('debugOptions'),
         )
-        self._debug_options['args'] = args
+        self._options.update_fom_debug_options(debug_options)
+        self._options.update_from_args(args)
 
-        debug_stdlib = self._debug_options.get('DEBUG_STDLIB', False)
-        self.api.set_use_libraries_filter(py_db, not debug_stdlib)
+        self.api.set_use_libraries_filter(py_db, not self._options.debug_stdlib)
 
         path_mappings = []
         for pathMapping in args.get('pathMappings', []):
@@ -257,21 +345,21 @@ class _PyDevJsonCommandProcessor(object):
         if bool(path_mappings):
             pydevd_file_utils.setup_client_server_paths(path_mappings)
 
-        if self._debug_options.get('REDIRECT_OUTPUT', False):
+        if self._options.redirect_output:
             py_db.enable_output_redirection(True, True)
         else:
             py_db.enable_output_redirection(False, False)
 
-        self.api.set_show_return_values(py_db, self._debug_options.get('SHOW_RETURN_VALUE', False))
+        self.api.set_show_return_values(py_db, self._options.show_return_value)
 
-        if not self._debug_options.get('BREAK_SYSTEMEXIT_ZERO', False):
+        if not self._options.break_system_exit_zero:
             ignore_system_exit_codes = [0]
-            if self._debug_options.get('DJANGO_DEBUG', False):
+            if self._options.django_debug:
                 ignore_system_exit_codes += [3]
 
             self.api.set_ignore_system_exit_codes(py_db, ignore_system_exit_codes)
 
-        if self._debug_options.get('STOP_ON_ENTRY', False) and start_reason == 'launch':
+        if self._options.stop_on_entry and start_reason == 'launch':
             self.api.stop_on_entry()
 
     def _send_process_event(self, py_db, start_method):
@@ -429,6 +517,11 @@ class _PyDevJsonCommandProcessor(object):
         '''
         :param DisconnectRequest request:
         '''
+        if request.arguments.terminateDebuggee:
+            self._request_terminate_process(py_db)
+            response = pydevd_base_schema.build_response(request)
+            return NetCommand(CMD_RETURN, 0, response, is_json=True)
+
         self._launch_or_attach_request_done = False
         py_db.enable_output_redirection(False, False)
         self.api.request_disconnect(py_db, resume_threads=True)
@@ -464,9 +557,9 @@ class _PyDevJsonCommandProcessor(object):
         suspend_policy = 'ALL'
 
         if not filename.lower().endswith('.py'):  # Note: check based on original file, not mapping.
-            if self._debug_options.get('DJANGO_DEBUG', False):
+            if self._options.django_debug:
                 btype = 'django-line'
-            elif self._debug_options.get('FLASK_DEBUG', False):
+            elif self._options.flask_debug:
                 btype = 'jinja2-line'
 
         breakpoints_set = []
@@ -497,7 +590,8 @@ class _PyDevJsonCommandProcessor(object):
                 elif error_code == self.api.ADD_BREAKPOINT_FILE_EXCLUDED_BY_FILTERS:
                     error_msg = 'Breakpoint in file excluded by filters.'
                     if py_db.get_use_libraries_filter():
-                        error_msg += '\nNote: may be excluded because of "justMyCode" option (default == true).'
+                        error_msg += ('\nNote: may be excluded because of "justMyCode" option (default == true).'
+                                      'Try setting \"justMyCode\": false in the debug configuration (e.g., launch.json).\n')
 
                 else:
                     # Shouldn't get here.
@@ -594,9 +688,9 @@ class _PyDevJsonCommandProcessor(object):
 
         if break_raised or break_uncaught:
             btype = None
-            if self._debug_options.get('DJANGO_DEBUG', False):
+            if self._options.django_debug:
                 btype = 'django'
-            elif self._debug_options.get('FLASK_DEBUG', False):
+            elif self._options.flask_debug:
                 btype = 'jinja2'
 
             if btype:
@@ -629,7 +723,7 @@ class _PyDevJsonCommandProcessor(object):
         # : :type exception_into_arguments: ExceptionInfoArguments
         exception_into_arguments = request.arguments
         thread_id = exception_into_arguments.threadId
-        max_frames = int(self._debug_options['args'].get('maxExceptionStackFrames', 0))
+        max_frames = self._options.max_exception_stack_frames
         self.api.request_exception_info_json(py_db, request, thread_id, max_frames)
 
     def on_scopes_request(self, py_db, request):
@@ -654,22 +748,25 @@ class _PyDevJsonCommandProcessor(object):
         # : :type arguments: EvaluateArguments
         arguments = request.arguments
 
-        thread_id = py_db.suspended_frames_manager.get_thread_id_for_variable_reference(
-            arguments.frameId)
-
-        if thread_id is not None:
-            self.api.request_exec_or_evaluate_json(
-                py_db, request, thread_id)
+        if arguments.frameId is None:
+            self.api.request_exec_or_evaluate_json(py_db, request, thread_id='*')
         else:
-            body = EvaluateResponseBody('', 0)
-            response = pydevd_base_schema.build_response(
-                request,
-                kwargs={
-                    'body': body,
-                    'success': False,
-                    'message': 'Unable to find thread for evaluation.'
-                })
-            return NetCommand(CMD_RETURN, 0, response, is_json=True)
+            thread_id = py_db.suspended_frames_manager.get_thread_id_for_variable_reference(
+                arguments.frameId)
+
+            if thread_id is not None:
+                self.api.request_exec_or_evaluate_json(
+                    py_db, request, thread_id)
+            else:
+                body = EvaluateResponseBody('', 0)
+                response = pydevd_base_schema.build_response(
+                    request,
+                    kwargs={
+                        'body': body,
+                        'success': False,
+                        'message': 'Unable to find thread for evaluation.'
+                    })
+                return NetCommand(CMD_RETURN, 0, response, is_json=True)
 
     def on_setexpression_request(self, py_db, request):
         # : :type arguments: SetExpressionArguments
@@ -739,6 +836,7 @@ class _PyDevJsonCommandProcessor(object):
 
         thread_id = py_db.suspended_frames_manager.get_thread_id_for_variable_reference(
             variables_reference)
+
         if thread_id is not None:
             self.api.request_change_variable_json(py_db, request, thread_id)
         else:
@@ -874,6 +972,8 @@ class _PyDevJsonCommandProcessor(object):
         except AttributeError:
             pid = None
 
+        ppid = self.api.get_ppid()
+
         try:
             impl_desc = platform.python_implementation()
         except AttributeError:
@@ -890,13 +990,19 @@ class _PyDevJsonCommandProcessor(object):
         platform_info = pydevd_schema.PydevdPlatformInfo(name=sys.platform)
         process_info = pydevd_schema.PydevdProcessInfo(
             pid=pid,
+            ppid=ppid,
             executable=sys.executable,
             bitness=64 if IS_64BIT_PROCESS else 32,
+        )
+        pydevd_info = pydevd_schema.PydevdInfo(
+            usingCython=USING_CYTHON,
+            usingFrameEval=USING_FRAME_EVAL,
         )
         body = {
             'python': py_info,
             'platform': platform_info,
             'process': process_info,
+            'pydevd': pydevd_info,
         }
         response = pydevd_base_schema.build_response(request, kwargs={'body': body})
         return NetCommand(CMD_RETURN, 0, response, is_json=True)
@@ -931,5 +1037,3 @@ class _PyDevJsonCommandProcessor(object):
         response = pydevd_base_schema.build_response(request)
         return NetCommand(CMD_RETURN, 0, response, is_json=True)
 
-
-process_net_command_json = _PyDevJsonCommandProcessor(pydevd_base_schema.from_json).process_net_command_json

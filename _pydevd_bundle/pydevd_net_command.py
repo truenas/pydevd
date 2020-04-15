@@ -1,27 +1,42 @@
-from _pydev_imps._pydev_saved_modules import threading
 from _pydevd_bundle.pydevd_constants import DebugInfoHolder, IS_PY2, \
     get_global_debugger, GetGlobalDebugger, set_global_debugger  # Keep for backward compatibility @UnusedImport
 from _pydevd_bundle.pydevd_utils import quote_smart as quote, to_string
-from _pydevd_bundle.pydevd_comm_constants import ID_TO_MEANING
+from _pydevd_bundle.pydevd_comm_constants import ID_TO_MEANING, CMD_EXIT
 from _pydevd_bundle.pydevd_constants import HTTP_PROTOCOL, HTTP_JSON_PROTOCOL, \
-    get_protocol, IS_JYTHON
+    get_protocol, IS_JYTHON, ForkSafeLock
 import json
 from _pydev_bundle import pydev_log
 
 
-class _NullNetCommand(object):
+class _BaseNetCommand(object):
 
+    # Command id. Should be set in instance.
     id = -1
+
+    # Dict representation of the command to be set in instance. Only set for json commands.
+    as_dict = None
 
     def send(self, *args, **kwargs):
         pass
 
 
+class _NullNetCommand(_BaseNetCommand):
+    pass
+
+
+class _NullExitCommand(_NullNetCommand):
+
+    id = CMD_EXIT
+
+
 # Constant meant to be passed to the writer when the command is meant to be ignored.
 NULL_NET_COMMAND = _NullNetCommand()
 
+# Exit command -- only internal (we don't want/need to send this to the IDE).
+NULL_EXIT_COMMAND = _NullExitCommand()
 
-class NetCommand:
+
+class NetCommand(_BaseNetCommand):
     """
     Commands received/sent over the network.
 
@@ -31,7 +46,7 @@ class NetCommand:
     next_seq = 0  # sequence numbers
 
     _showing_debug_info = 0
-    _show_debug_info_lock = threading.RLock()
+    _show_debug_info_lock = ForkSafeLock(rlock=True)
 
     def __init__(self, cmd_id, seq, text, is_json=False):
         """
@@ -54,6 +69,7 @@ class NetCommand:
                 as_dict = text
             as_dict['pydevd_cmd_id'] = cmd_id
             as_dict['seq'] = seq
+            self.as_dict = as_dict
             text = json.dumps(as_dict)
 
         if IS_PY2:

@@ -1,11 +1,14 @@
 #!/bin/bash
 set -ev
 
-source activate build_env
-conda install --yes numpy ipython pytest cython psutil
+if [[ ("$PYDEVD_PYTHON_VERSION" != "3.8" && "$PYDEVD_PYTHON_VERSION" != "2.6") ]]; then
+    source activate build_env
+    conda install --yes numpy ipython pytest cython psutil
+fi
 
 if [ "$PYDEVD_PYTHON_VERSION" = "2.6" ]; then
-    conda install --yes pyqt=4
+    source activate build_env
+    conda install --yes numpy ipython pytest cython psutil pyqt=4 py=1.4.30
     pip install pympler==0.5
     pip install pathlib2
     # Django 1.7 does not support Python 2.6
@@ -30,12 +33,27 @@ fi
 if [ "$PYDEVD_PYTHON_VERSION" = "3.6" ]; then
     conda install --yes pyqt=5 gevent
     pip install "django>=2.2,<2.3"
+    pip install trio
 fi
 
 if [ "$PYDEVD_PYTHON_VERSION" = "3.7" ]; then
     conda install --yes pyqt=5 matplotlib
-    # Note: track the latest django
+    # Note: track the latest web framework versions.
     pip install "django"
+    pip install "cherrypy"
+    pip install trio
+fi
+
+if [ "$PYDEVD_PYTHON_VERSION" = "3.8" ]; then
+    pip install "pytest"
+    pip install "cython"
+    pip install "psutil"
+    pip install "numpy"
+    pip install trio
+    
+    # Note: track the latest web framework versions.
+    pip install "django"
+    pip install "cherrypy"
 fi
 
 pip install untangle

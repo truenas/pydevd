@@ -1,21 +1,27 @@
 # coding: utf-8
+from collections import namedtuple
+import json
+from os.path import normcase
+import os.path
+import sys
+import time
+
 import pytest
 
+from _pydev_bundle.pydev_localhost import get_socket_name
 from _pydevd_bundle._debug_adapter import pydevd_schema, pydevd_base_schema
 from _pydevd_bundle._debug_adapter.pydevd_base_schema import from_json
-from tests_python.debugger_unittest import IS_JYTHON, IS_APPVEYOR, overrides
 from _pydevd_bundle._debug_adapter.pydevd_schema import (ThreadEvent, ModuleEvent, OutputEvent,
-    ExceptionOptions, Response, StoppedEvent, ContinuedEvent, ProcessEvent)
-from tests_python import debugger_unittest
-import json
-from collections import namedtuple
-from _pydevd_bundle.pydevd_constants import (int_types, IS_64BIT_PROCESS,
-    PY_VERSION_STR, PY_IMPL_VERSION_STR, PY_IMPL_NAME)
-from tests_python.debug_constants import *  # noqa
-import time
-from os.path import normcase
-from _pydev_bundle.pydev_localhost import get_socket_name
+    ExceptionOptions, Response, StoppedEvent, ContinuedEvent, ProcessEvent, InitializeRequest,
+    InitializeRequestArguments, TerminateArguments, TerminateRequest, TerminatedEvent)
 from _pydevd_bundle.pydevd_comm_constants import file_system_encoding
+from _pydevd_bundle.pydevd_constants import (int_types, IS_64BIT_PROCESS,
+    PY_VERSION_STR, PY_IMPL_VERSION_STR, PY_IMPL_NAME, IS_PY36_OR_GREATER)
+from tests_python import debugger_unittest
+from tests_python.debug_constants import TEST_CHERRYPY, IS_PY2, TEST_DJANGO, TEST_FLASK, IS_PY26, \
+    IS_PY27, IS_CPYTHON
+from tests_python.debugger_unittest import (IS_JYTHON, IS_APPVEYOR, overrides,
+    get_free_port, wait_for_condition)
 
 pytest_plugins = [
     str('tests_python.debugger_fixtures'),
@@ -39,11 +45,12 @@ class _MessageWithMark(object):
 
 class JsonFacade(object):
 
-    def __init__(self, writer):
+    def __init__(self, writer, send_json_startup_messages=True):
         self.writer = writer
         writer.reader_thread.accept_xml_messages = False
-        writer.write_set_protocol('http_json')
-        writer.write_multi_threads_single_notification(True)
+        if send_json_startup_messages:
+            writer.write_set_protocol('http_json')
+            writer.write_multi_threads_single_notification(True)
         self._all_json_messages_found = []
         self._sent_launch_or_attach = False
 
@@ -106,6 +113,9 @@ class JsonFacade(object):
 
     def write_list_threads(self):
         return self.wait_for_response(self.write_request(pydevd_schema.ThreadsRequest()))
+
+    def wait_for_terminated(self):
+        return self.wait_for_json_message(TerminatedEvent)
 
     def wait_for_thread_stopped(self, reason='breakpoint', line=None, file=None, name=None):
         '''
@@ -233,11 +243,11 @@ class JsonFacade(object):
     def write_attach(self, **arguments):
         return self._write_launch_or_attach('attach', **arguments)
 
-    def write_disconnect(self, wait_for_response=True):
+    def write_disconnect(self, wait_for_response=True, terminate_debugee=False):
         assert self._sent_launch_or_attach
         self._sent_launch_or_attach = False
-        arguments = pydevd_schema.DisconnectArguments(terminateDebuggee=False)
-        request = pydevd_schema.DisconnectRequest(arguments)
+        arguments = pydevd_schema.DisconnectArguments(terminateDebuggee=terminate_debugee)
+        request = pydevd_schema.DisconnectRequest(arguments=arguments)
         self.write_request(request)
         if wait_for_response:
             self.wait_for_response(request)
@@ -329,7 +339,10 @@ class JsonFacade(object):
                 frame_variables_reference, name, value,
         )))
         set_variable_response = self.wait_for_response(set_variable_request)
-        assert set_variable_response.success == success
+        if set_variable_response.success != success:
+            raise AssertionError(
+                'Expected %s. Found: %s\nResponse: %s\n' % (
+                    success, set_variable_response.success, set_variable_response.to_json()))
         return set_variable_response
 
     def get_name_to_scope(self, frame_id):
@@ -369,13 +382,21 @@ class JsonFacade(object):
             variables_response = self.get_variables_response(variables_reference)
             return pydevd_schema.Variable(**variables_response.body.variables[index])
 
-    def write_set_debugger_property(self, dont_trace_start_patterns, dont_trace_end_patterns):
+    def write_set_debugger_property(
+            self,
+            dont_trace_start_patterns=None,
+            dont_trace_end_patterns=None,
+            multi_threads_single_notification=None,
+            success=True
+        ):
         dbg_request = self.write_request(
             pydevd_schema.SetDebuggerPropertyRequest(pydevd_schema.SetDebuggerPropertyArguments(
                 dontTraceStartPatterns=dont_trace_start_patterns,
-                dontTraceEndPatterns=dont_trace_end_patterns)))
+                dontTraceEndPatterns=dont_trace_end_patterns,
+                multiThreadsSingleNotification=multi_threads_single_notification,
+            )))
         response = self.wait_for_response(dbg_request)
-        assert response.success
+        assert response.success == success
         return response
 
     def write_set_pydevd_source_map(self, source, pydevd_source_maps, success=True):
@@ -387,6 +408,39 @@ class JsonFacade(object):
         response = self.wait_for_response(dbg_request)
         assert response.success == success
         return response
+
+    def write_initialize(self, success=True):
+        arguments = InitializeRequestArguments(
+            adapterID='pydevd_test_case',
+        )
+        response = self.wait_for_response(self.write_request(InitializeRequest(arguments)))
+        assert response.success == success
+        if success:
+            process_id = response.body.kwargs['pydevd']['processId']
+            assert isinstance(process_id, int)
+        return response
+
+    def write_authorize(self, access_token, success=True):
+        from _pydevd_bundle._debug_adapter.pydevd_schema import PydevdAuthorizeArguments
+        from _pydevd_bundle._debug_adapter.pydevd_schema import PydevdAuthorizeRequest
+        arguments = PydevdAuthorizeArguments(
+            debugServerAccessToken=access_token,
+        )
+        response = self.wait_for_response(self.write_request(PydevdAuthorizeRequest(arguments)))
+        assert response.success == success
+        return response
+
+    def evaluate(self, expression, frameId=None, context=None, fmt=None, success=True):
+        eval_request = self.write_request(
+            pydevd_schema.EvaluateRequest(pydevd_schema.EvaluateArguments(
+                expression, frameId=frameId, context=context, format=fmt)))
+        eval_response = self.wait_for_response(eval_request)
+        assert eval_response.success == success
+        return eval_response
+
+    def write_terminate(self):
+        # Note: this currently terminates promptly, so, no answer is given.
+        self.write_request(TerminateRequest(arguments=TerminateArguments()))
 
 
 def test_case_json_logpoints(case_setup):
@@ -420,7 +474,65 @@ def test_case_json_logpoints(case_setup):
 
         # Just one hit at the end (break 3).
         json_facade.wait_for_thread_stopped(line=break_3)
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+def test_case_json_logpoint_and_step(case_setup):
+    with case_setup.test_file('_debugger_case_hit_count.py') as writer:
+        json_facade = JsonFacade(writer)
+
+        json_facade.write_launch()
+        before_loop_line = writer.get_line_index_with_content('before loop line')
+        for_line = writer.get_line_index_with_content('for line')
+        print_line = writer.get_line_index_with_content('print line')
+        json_facade.write_set_breakpoints(
+            [before_loop_line, print_line],
+            line_to_info={
+                print_line: {'log_message': 'var {repr("_a")} is {_a}'}
+        })
+        json_facade.write_make_initial_run()
+
+        json_hit = json_facade.wait_for_thread_stopped(line=before_loop_line)
+
+        json_facade.write_step_in(json_hit.thread_id)
+        json_hit = json_facade.wait_for_thread_stopped('step', line=for_line)
+
+        json_facade.write_step_in(json_hit.thread_id)
+        json_hit = json_facade.wait_for_thread_stopped('step', line=print_line)
+
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+@pytest.mark.skipif(IS_PY26, reason='Failing on Python 2.6')
+def test_case_json_hit_count_and_step(case_setup):
+    with case_setup.test_file('_debugger_case_hit_count.py') as writer:
+        json_facade = JsonFacade(writer)
+
+        json_facade.write_launch()
+        for_line = writer.get_line_index_with_content('for line')
+        print_line = writer.get_line_index_with_content('print line')
+        json_facade.write_set_breakpoints(
+            [print_line],
+            line_to_info={
+                print_line: {'hit_condition': '5'}
+        })
+        json_facade.write_make_initial_run()
+
+        json_hit = json_facade.wait_for_thread_stopped(line=print_line)
+        i_local_var = json_facade.get_local_var(json_hit.frame_id, 'i')  # : :type i_local_var: pydevd_schema.Variable
+        assert i_local_var.value == '4'
+
+        json_facade.write_step_in(json_hit.thread_id)
+        json_hit = json_facade.wait_for_thread_stopped('step', line=for_line)
+
+        json_facade.write_step_in(json_hit.thread_id)
+        json_hit = json_facade.wait_for_thread_stopped('step', line=print_line)
+
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -449,7 +561,18 @@ def test_case_json_change_breaks(case_setup):
 
         json_facade.wait_for_thread_stopped(line=break1_line)
         json_facade.write_set_breakpoints([])
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+def test_case_handled_exception_no_break_on_generator(case_setup):
+    with case_setup.test_file('_debugger_case_ignore_exceptions.py') as writer:
+        json_facade = JsonFacade(writer)
+
+        json_facade.write_launch()
+        json_facade.write_set_exception_breakpoints(['raised'])
+        json_facade.write_make_initial_run()
 
         writer.finished_ok = True
 
@@ -471,24 +594,99 @@ def test_case_handled_exception_breaks(case_setup):
 
         # Clear so that the last one is not hit.
         json_facade.write_set_exception_breakpoints([])
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
 
-def test_case_unhandled_exception(case_setup):
+@pytest.mark.parametrize('target', [
+    'absolute',
+    'relative',
+    ])
+@pytest.mark.parametrize('just_my_code', [
+    True,
+    False,
+    ])
+def test_case_unhandled_exception_just_my_code(case_setup, target, just_my_code):
+
+    def check_test_suceeded_msg(writer, stdout, stderr):
+        # Don't call super (we have an unhandled exception in the stack trace).
+        return 'TEST SUCEEDED' in ''.join(stderr)
+
+    def additional_output_checks(writer, stdout, stderr):
+        if 'call_exception_in_exec()' not in stderr:
+            raise AssertionError('Expected test to have an unhandled exception.\nstdout:\n%s\n\nstderr:\n%s' % (
+                stdout, stderr))
+
+    def get_environ(self):
+        env = os.environ.copy()
+
+        # Note that we put the working directory in the project roots to check that when expanded
+        # the relative file that doesn't exist is still considered a library file.
+        env["IDE_PROJECT_ROOTS"] = os.path.dirname(self.TEST_FILE) + os.pathsep + os.path.abspath('.')
+        return env
+
+    def update_command_line_args(writer, args):
+        ret = debugger_unittest.AbstractWriterThread.update_command_line_args(writer, args)
+        if target == 'absolute':
+            if sys.platform == 'win32':
+                ret.append('c:/temp/folder/my_filename.pyx')
+            else:
+                ret.append('/temp/folder/my_filename.pyx')
+
+        elif target == 'relative':
+            ret.append('folder/my_filename.pyx')
+
+        else:
+            raise AssertionError('Unhandled case: %s' % (target,))
+        return args
+
+    target_filename = '_debugger_case_unhandled_just_my_code.py'
+    with case_setup.test_file(
+            target_filename,
+            check_test_suceeded_msg=check_test_suceeded_msg,
+            additional_output_checks=additional_output_checks,
+            update_command_line_args=update_command_line_args,
+            get_environ=get_environ,
+            EXPECTED_RETURNCODE=1,
+        ) as writer:
+        json_facade = JsonFacade(writer)
+
+        json_facade.write_launch(debugStdLib=False if just_my_code else True)
+        json_facade.write_set_exception_breakpoints(['uncaught'])
+        json_facade.write_make_initial_run()
+
+        json_hit = json_facade.wait_for_thread_stopped(reason='exception')
+        frames = json_hit.stack_trace_response.body.stackFrames
+        if just_my_code:
+            assert len(frames) == 1
+            assert frames[0]['source']['path'].endswith(target_filename)
+        else:
+            assert len(frames) > 1
+            assert frames[0]['source']['path'].endswith('my_filename.pyx')
+
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+@pytest.mark.parametrize('target_file', [
+    '_debugger_case_unhandled_exceptions.py',
+    '_debugger_case_unhandled_exceptions_custom.py',
+    ])
+def test_case_unhandled_exception(case_setup, target_file):
 
     def check_test_suceeded_msg(writer, stdout, stderr):
         # Don't call super (we have an unhandled exception in the stack trace).
         return 'TEST SUCEEDED' in ''.join(stdout) and 'TEST SUCEEDED' in ''.join(stderr)
 
     def additional_output_checks(writer, stdout, stderr):
-        if 'raise Exception' not in stderr:
+        if 'raise MyError' not in stderr and 'raise Exception' not in stderr:
             raise AssertionError('Expected test to have an unhandled exception.\nstdout:\n%s\n\nstderr:\n%s' % (
                 stdout, stderr))
 
     with case_setup.test_file(
-            '_debugger_case_unhandled_exceptions.py',
+            target_file,
             check_test_suceeded_msg=check_test_suceeded_msg,
             additional_output_checks=additional_output_checks,
             EXPECTED_RETURNCODE=1,
@@ -503,16 +701,64 @@ def test_case_unhandled_exception(case_setup):
         line_in_thread2 = writer.get_line_index_with_content('in thread 2')
         line_in_main = writer.get_line_index_with_content('in main')
         json_facade.wait_for_thread_stopped(
-            reason='exception', line=(line_in_thread1, line_in_thread2), file='_debugger_case_unhandled_exceptions.py')
+            reason='exception', line=(line_in_thread1, line_in_thread2), file=target_file)
         json_facade.write_continue()
 
         json_facade.wait_for_thread_stopped(
-            reason='exception', line=(line_in_thread1, line_in_thread2), file='_debugger_case_unhandled_exceptions.py')
+            reason='exception', line=(line_in_thread1, line_in_thread2), file=target_file)
         json_facade.write_continue()
 
         json_facade.wait_for_thread_stopped(
-            reason='exception', line=line_in_main, file='_debugger_case_unhandled_exceptions.py')
-        json_facade.write_continue(wait_for_response=False)
+            reason='exception', line=line_in_main, file=target_file)
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+@pytest.mark.parametrize('target_file', [
+    '_debugger_case_unhandled_exceptions_generator.py',
+    '_debugger_case_unhandled_exceptions_listcomp.py',
+    ])
+def test_case_unhandled_exception_generator(case_setup, target_file):
+
+    def check_test_suceeded_msg(writer, stdout, stderr):
+        # Don't call super (we have an unhandled exception in the stack trace).
+        return 'TEST SUCEEDED' in ''.join(stdout) and 'TEST SUCEEDED' in ''.join(stderr)
+
+    def additional_output_checks(writer, stdout, stderr):
+        if 'ZeroDivisionError' not in stderr:
+            raise AssertionError('Expected test to have an unhandled exception.\nstdout:\n%s\n\nstderr:\n%s' % (
+                stdout, stderr))
+
+    with case_setup.test_file(
+            target_file,
+            check_test_suceeded_msg=check_test_suceeded_msg,
+            additional_output_checks=additional_output_checks,
+            EXPECTED_RETURNCODE=1,
+        ) as writer:
+        json_facade = JsonFacade(writer)
+
+        json_facade.write_launch()
+        json_facade.write_set_exception_breakpoints(['uncaught'])
+        json_facade.write_make_initial_run()
+
+        line_in_main = writer.get_line_index_with_content('exc line')
+
+        json_hit = json_facade.wait_for_thread_stopped(
+            reason='exception', line=line_in_main, file=target_file)
+        frames = json_hit.stack_trace_response.body.stackFrames
+        json_facade.write_continue()
+
+        if 'generator' in target_file:
+            expected_frame_names = ['<genexpr>', 'f', '<module>']
+        else:
+            if IS_PY27 or IS_PY26:
+                expected_frame_names = ['f', '<module>']
+            else:
+                expected_frame_names = ['<listcomp>', 'f', '<module>']
+
+        frame_names = [f['name'] for f in frames]
+        assert frame_names == expected_frame_names
 
         writer.finished_ok = True
 
@@ -527,7 +773,7 @@ def test_case_sys_exit_unhandled_exception(case_setup):
         break_line = writer.get_line_index_with_content('sys.exit(1)')
         json_facade.wait_for_thread_stopped(
             reason='exception', line=break_line)
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -547,7 +793,7 @@ def test_case_sys_exit_0_unhandled_exception(case_setup, break_on_system_exit_ze
         if break_on_system_exit_zero:
             json_facade.wait_for_thread_stopped(
                 reason='exception', line=break_line)
-            json_facade.write_continue(wait_for_response=False)
+            json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -572,7 +818,7 @@ def test_case_sys_exit_0_handled_exception(case_setup, break_on_system_exit_zero
 
             json_facade.wait_for_thread_stopped(
                 reason='exception', line=break_main_line)
-            json_facade.write_continue(wait_for_response=False)
+            json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -601,7 +847,7 @@ def test_case_handled_exception_breaks_by_type(case_setup):
             ])
         ])
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -625,7 +871,7 @@ def test_case_json_protocol(case_setup):
         assert next(iter(response.body.threads))['name'] == 'MainThread'
 
         # Removes breakpoints and proceeds running.
-        json_facade.write_disconnect(wait_for_response=False)
+        json_facade.write_disconnect()
 
         writer.finished_ok = True
 
@@ -645,7 +891,7 @@ def test_case_started_exited_threads_protocol(case_setup):
         exited_events = json_facade.mark_messages(ThreadEvent, lambda x: x.body.reason == 'exited')
         assert len(started_events) == 4
         assert len(exited_events) == 3  # Main is still running.
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -690,7 +936,7 @@ def test_case_path_translation_not_skipped(case_setup):
 
         assert json_hit.stack_trace_response.body.stackFrames[-1]['source']['path'] == \
             os.path.join(sys_folder, 'my_code.py')
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -766,7 +1012,7 @@ def test_case_skipping_filters(case_setup, custom_setup):
                 33, filename=other_filename, verified=False, expected_lines_in_response=[14])
             assert response.body.breakpoints == [{
                 'verified': False,
-                'message': 'Breakpoint in file excluded by filters.\nNote: may be excluded because of "justMyCode" option (default == true).',
+                'message': 'Breakpoint in file excluded by filters.\nNote: may be excluded because of \"justMyCode\" option (default == true).Try setting \"justMyCode\": false in the debug configuration (e.g., launch.json).\n',
                 'source': {'path': other_filename},
                 'line': 14
             }]
@@ -818,9 +1064,7 @@ def test_case_skipping_filters(case_setup, custom_setup):
         json_facade.write_step_next(json_hit.thread_id)
 
         if IS_JYTHON:
-            json_facade.write_continue(wait_for_response=False)
-        else:
-            json_facade.write_step_next(json_hit.thread_id, wait_for_response=False)
+            json_facade.write_continue()
 
         # Check that it's sent only once.
         assert len(json_facade.mark_messages(
@@ -891,7 +1135,7 @@ def test_case_completions_json(case_setup):
                 assert not response.success
                 assert response.message.startswith('Wrong ID sent from the client:')
 
-            json_facade.write_continue(wait_for_response=False)
+            json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -921,7 +1165,7 @@ def test_modules(case_setup):
         assert module['name'] == '__main__'
         assert module['path'].endswith('_debugger_case_local_variables.py')
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
@@ -974,12 +1218,43 @@ def test_stack_and_variables_dict(case_setup):
             {'name': '__len__', 'value': '2', 'type': 'int', 'evaluateName': 'len(variable_for_test_3)', 'variablesReference': 0, 'presentationHint': {'attributes': ['readOnly']}}
         ]
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
-def test_return_value(case_setup):
-    with case_setup.test_file('_debugger_case_return_value.py') as writer:
+@pytest.mark.skipif(IS_PY26, reason='__dir__ not customizable on Python 2.6')
+def test_exception_on_dir(case_setup):
+    with case_setup.test_file('_debugger_case_dir_exception.py') as writer:
+        json_facade = JsonFacade(writer)
+
+        writer.write_add_breakpoint(writer.get_line_index_with_content('Break here'))
+        json_facade.write_make_initial_run()
+
+        json_hit = json_facade.wait_for_thread_stopped()
+        json_hit = json_facade.get_stack_as_json_hit(json_hit.thread_id)
+
+        variables_response = json_facade.get_variables_response(json_hit.frame_id)
+
+        variables_references = json_facade.pop_variables_reference(variables_response.body.variables)
+        variables_response = json_facade.get_variables_response(variables_references[0])
+        assert variables_response.body.variables == [
+            {'variablesReference': 0, 'type': 'int', 'evaluateName': 'self.__dict__[var1]', 'name': 'var1', 'value': '10'}]
+
+        json_facade.write_continue()
+        writer.finished_ok = True
+
+
+@pytest.mark.parametrize('scenario', [
+    'step_in',
+    'step_next',
+    'step_out',
+])
+@pytest.mark.parametrize('asyncio', [True, False])
+def test_return_value_regular(case_setup, scenario, asyncio):
+    if IS_PY2 and asyncio:
+        raise pytest.skip('asyncio not available for python 2.')
+
+    with case_setup.test_file('_debugger_case_return_value.py' if not asyncio else '_debugger_case_return_value_asyncio.py') as writer:
         json_facade = JsonFacade(writer)
 
         break_line = writer.get_line_index_with_content('break here')
@@ -988,8 +1263,26 @@ def test_return_value(case_setup):
         json_facade.write_make_initial_run()
 
         json_hit = json_facade.wait_for_thread_stopped()
-        json_facade.write_step_next(json_hit.thread_id)
-        json_hit = json_facade.wait_for_thread_stopped('step', name='<module>', line=break_line + 1)
+        if scenario == 'step_next':
+            json_facade.write_step_next(json_hit.thread_id)
+            json_hit = json_facade.wait_for_thread_stopped('step', name='main', line=break_line + 1)
+
+        elif scenario == 'step_in':
+            json_facade.write_step_in(json_hit.thread_id)
+            json_hit = json_facade.wait_for_thread_stopped('step', name='method1')
+
+            json_facade.write_step_in(json_hit.thread_id)
+            json_hit = json_facade.wait_for_thread_stopped('step', name='main')
+
+        elif scenario == 'step_out':
+            json_facade.write_step_in(json_hit.thread_id)
+            json_hit = json_facade.wait_for_thread_stopped('step', name='method1')
+
+            json_facade.write_step_out(json_hit.thread_id)
+            json_hit = json_facade.wait_for_thread_stopped('step', name='main')
+
+        else:
+            raise AssertionError('unhandled scenario: %s' % (scenario,))
 
         variables_response = json_facade.get_variables_response(json_hit.frame_id)
         return_variables = json_facade.filter_return_variables(variables_response.body.variables)
@@ -1002,7 +1295,7 @@ def test_return_value(case_setup):
             'variablesReference': 0,
         }]
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
@@ -1053,7 +1346,7 @@ def test_stack_and_variables_set_and_list(case_setup):
             u'presentationHint': {'attributes': ['readOnly']},
         }]
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
@@ -1107,7 +1400,63 @@ def test_evaluate_unicode(case_setup):
                 'presentationHint': {'attributes': ['rawString']},
             }
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
+        writer.finished_ok = True
+
+
+@pytest.mark.skipif(IS_PY26, reason='Not ok on Python 2.6.')
+def test_evaluate_exec_unicode(case_setup):
+
+    def get_environ(writer):
+        env = os.environ.copy()
+
+        env["PYTHONIOENCODING"] = 'utf-8'
+        return env
+
+    with case_setup.test_file('_debugger_case_local_variables2.py', get_environ=get_environ) as writer:
+        json_facade = JsonFacade(writer)
+        writer.write_start_redirect()
+
+        writer.write_add_breakpoint(writer.get_line_index_with_content('Break here'))
+        json_facade.write_make_initial_run()
+
+        json_hit = json_facade.wait_for_thread_stopped()
+        json_hit = json_facade.get_stack_as_json_hit(json_hit.thread_id)
+
+        # Check eval
+        json_facade.evaluate(
+            "print(u'中')",
+            frameId=json_hit.frame_id,
+            context="repl",
+        )
+
+        messages = json_facade.mark_messages(
+            OutputEvent, lambda output_event: u'中' in output_event.body.output)
+        assert len(messages) == 1
+
+        # Check exec
+        json_facade.evaluate(
+            "a=10;print(u'中')",
+            frameId=json_hit.frame_id,
+            context="repl",
+        )
+
+        messages = json_facade.mark_messages(
+            OutputEvent, lambda output_event: u'中' in output_event.body.output)
+        assert len(messages) == 1
+
+        response = json_facade.evaluate(
+            "u'中'",
+            frameId=json_hit.frame_id,
+            context="repl",
+        )
+        assert response.body.result in ("u'\\u4e2d'", "'\u4e2d'")  # py2 or py3
+
+        messages = json_facade.mark_messages(
+            OutputEvent, lambda output_event: u'中' in output_event.body.output)
+        assert len(messages) == 0  # i.e.: we don't print in this case.
+
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
@@ -1161,7 +1510,7 @@ def test_evaluate_variable_references(case_setup):
             }
         ]
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
@@ -1187,7 +1536,7 @@ def test_set_expression(case_setup):
         assert {'name': 'bb', 'value': '20', 'type': 'int', 'evaluateName': 'bb', 'variablesReference': 0} in \
             variables_response.to_dict()['body']['variables']
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
@@ -1211,7 +1560,7 @@ def test_set_expression_failures(case_setup):
         assert not set_expression_response.success
         assert set_expression_response.message == 'Unable to find thread to set expression.'
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1262,7 +1611,7 @@ def test_set_variable_failure(case_setup):
         assert not set_variable_response.success
         assert set_variable_response.message == 'Unable to find thread to evaluate variable reference.'
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1390,7 +1739,7 @@ def test_set_variable_multiple_cases(case_setup, _check_func):
 
         _check_func(json_facade, json_hit)
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1497,7 +1846,7 @@ def test_stack_and_variables(case_setup):
                 'evaluateName': 'variable_for_test_1',
             }
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1571,7 +1920,7 @@ def test_hex_variables(case_setup):
             'evaluateName': 'variables_for_test_4'
         }
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1587,7 +1936,7 @@ def test_stopped_event(case_setup):
         json_hit = json_facade.wait_for_thread_stopped()
         assert json_hit.thread_id
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1618,7 +1967,7 @@ def test_pause_and_continue(case_setup):
         set_variable_response_as_dict = set_variable_response.to_dict()['body']
         assert set_variable_response_as_dict == {'value': "False", 'type': 'bool', 'variablesReference': 0}
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1644,7 +1993,7 @@ def test_step_out_multi_threads(case_setup, stepping_resumes_all_threads):
 
         if stepping_resumes_all_threads:
             # If we're stepping with multiple threads, we'll exit here.
-            json_facade.write_step_out(thread_name_to_id['thread1'], wait_for_response=False)
+            json_facade.write_step_out(thread_name_to_id['thread1'])
         else:
             json_facade.write_step_out(thread_name_to_id['thread1'])
 
@@ -1660,7 +2009,7 @@ def test_step_out_multi_threads(case_setup, stepping_resumes_all_threads):
             json_facade.write_step_next(thread_name_to_id['MainThread'])
             json_hit = json_facade.wait_for_thread_stopped('step')
             assert json_hit.thread_id == thread_name_to_id['MainThread']
-            json_facade.write_continue(wait_for_response=False)
+            json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1716,7 +2065,7 @@ def test_step_next_step_in_multi_threads(case_setup, stepping_resumes_all_thread
                 # we're not resuming other threads on step.
                 pass
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1753,7 +2102,7 @@ def test_stepping(case_setup):
         json_facade.write_step_out(json_hit.thread_id)
         json_hit = json_facade.wait_for_thread_stopped('step', name='Call')
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1774,28 +2123,43 @@ def test_evaluate(case_setup):
         stack_frame = next(iter(stack_trace_response.body.stackFrames))
         stack_frame_id = stack_frame['id']
 
+        # Check that evaluating variable that does not exist in hover returns success == False.
+        json_facade.evaluate(
+            'var_does_not_exist', frameId=stack_frame_id, context='hover', success=False)
+
         # Test evaluate request that results in 'eval'
-        eval_request = json_facade.write_request(
-            pydevd_schema.EvaluateRequest(pydevd_schema.EvaluateArguments('var_1', frameId=stack_frame_id, context='repl')))
-        eval_response = json_facade.wait_for_response(eval_request)
+        eval_response = json_facade.evaluate('var_1', frameId=stack_frame_id, context='repl')
         assert eval_response.body.result == '5'
         assert eval_response.body.type == 'int'
 
         # Test evaluate request that results in 'exec'
-        exec_request = json_facade.write_request(
-            pydevd_schema.EvaluateRequest(pydevd_schema.EvaluateArguments('var_1 = 6', frameId=stack_frame_id, context='repl')))
-        exec_response = json_facade.wait_for_response(exec_request)
+        exec_response = json_facade.evaluate('var_1 = 6', frameId=stack_frame_id, context='repl')
         assert exec_response.body.result == ''
 
         # Test evaluate request that results in 'exec' but fails
-        exec_request = json_facade.write_request(
-            pydevd_schema.EvaluateRequest(pydevd_schema.EvaluateArguments('var_1 = "abc"/6', frameId=stack_frame_id, context='repl')))
-        exec_response = json_facade.wait_for_response(exec_request)
-        assert exec_response.success == False
-        assert exec_response.body.result.find('TypeError') > -1
-        assert exec_response.message.find('TypeError') > -1
+        exec_response = json_facade.evaluate(
+            'var_1 = "abc"/6', frameId=stack_frame_id, context='repl', success=False)
+        assert 'TypeError' in exec_response.body.result
+        assert 'TypeError' in exec_response.message
 
-        json_facade.write_continue(wait_for_response=False)
+        # Evaluate without a frameId.
+
+        # Error because 'foo_value' is not set in 'sys'.
+        exec_response = json_facade.evaluate('import email;email.foo_value', success=False)
+        assert 'AttributeError' in exec_response.body.result
+        assert 'AttributeError' in exec_response.message
+
+        # Reading foo_value didn't work, but 'email' should be in the namespace now.
+        json_facade.evaluate('email.foo_value=True')
+
+        # Ok, 'foo_value' is now set in 'email' module.
+        exec_response = json_facade.evaluate('email.foo_value')
+
+        # We don't actually get variables without a frameId, we can just evaluate and observe side effects
+        # (so, the result is always empty -- or an error).
+        assert exec_response.body.result == ''
+
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1821,7 +2185,10 @@ def test_evaluate_failures(case_setup):
             json_hit = json_facade.get_stack_as_json_hit(json_hit.thread_id)
             if i == 0:
                 first_hit = json_hit
-
+                # Check that watch exceptions are shown as string/failure.
+                response = json_facade.evaluate(
+                    'invalid_var', frameId=first_hit.frame_id, context='watch', success=False)
+                assert response.body.result == "NameError: name 'invalid_var' is not defined"
             if i == 1:
                 # Now, check with a previously existing frameId.
                 exec_request = json_facade.write_request(
@@ -1866,6 +2233,12 @@ def test_exception_details(case_setup, max_frames):
         exc_info_request = json_facade.write_request(
             pydevd_schema.ExceptionInfoRequest(pydevd_schema.ExceptionInfoArguments(json_hit.thread_id)))
         exc_info_response = json_facade.wait_for_response(exc_info_request)
+
+        stack_frames = json_hit.stack_trace_response.body.stackFrames
+        assert 100 <= len(stack_frames) <= 104
+        assert stack_frames[-1]['name'] == '<module>'
+        assert stack_frames[0]['name'] == 'method1'
+
         body = exc_info_response.body
         assert body.exceptionId.endswith('IndexError')
         assert body.description == 'foo'
@@ -1874,7 +2247,7 @@ def test_exception_details(case_setup, max_frames):
         assert  min_expected_lines <= stack_line_count <= max_expected_lines
 
         json_facade.write_set_exception_breakpoints([])  # Don't stop on reraises.
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1910,7 +2283,7 @@ def test_stack_levels(case_setup):
 
         assert full_stack_frames == received_frames
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1943,7 +2316,7 @@ def test_breakpoint_adjustment(case_setup):
         stack_frame = next(iter(stack_trace_response.body.stackFrames))
         assert stack_frame['line'] == bp_expected
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -1999,7 +2372,7 @@ def test_goto(case_setup):
 
         # we hit the breakpoint again. Since we moved back
         json_facade.wait_for_thread_stopped()
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -2068,7 +2441,7 @@ def test_set_debugger_property(case_setup, dbg_property):
         else:
             raise AssertionError('Unexpected: %s' % (dbg_property,))
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -2154,11 +2527,145 @@ def test_source_mapping(case_setup):
 
         json_facade.wait_for_thread_stopped(line=map_to_cell_2_line2, file=os.path.basename(test_file))
         json_facade.write_set_breakpoints([])  # Clears breakpoints
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
 
+@pytest.mark.skipif(not TEST_CHERRYPY, reason='No CherryPy available')
+def test_process_autoreload_cherrypy(case_setup_multiprocessing, tmpdir):
+    '''
+    CherryPy does an os.execv(...) which will kill the running process and replace
+    it with a new process when a reload takes place, so, it mostly works as
+    a new process connection (everything is the same except that the
+    existing process is stopped).
+    '''
+    port = get_free_port()
+    # We write a temp file because we'll change it to autoreload later on.
+    f = tmpdir.join('_debugger_case_cherrypy.py')
+
+    tmplt = '''
+import cherrypy
+cherrypy.config.update({
+    'engine.autoreload.on': True,
+    'checker.on': False,
+    'server.socket_port': %(port)s,
+})
+class HelloWorld(object):
+
+    @cherrypy.expose
+    def index(self):
+        print('TEST SUCEEDED')
+        return "Hello World %(str)s!"  # break here
+    @cherrypy.expose('/exit')
+    def exit(self):
+        cherrypy.engine.exit()
+
+cherrypy.quickstart(HelloWorld())
+'''
+
+    f.write(tmplt % dict(port=port, str='INITIAL'))
+
+    file_to_check = str(f)
+
+    def get_environ(writer):
+        env = os.environ.copy()
+
+        env["PYTHONIOENCODING"] = 'utf-8'
+        env["PYTHONPATH"] = str(tmpdir)
+        return env
+
+    import threading
+    from tests_python.debugger_unittest import AbstractWriterThread
+    with case_setup_multiprocessing.test_file(file_to_check, get_environ=get_environ) as writer:
+
+        original_ignore_stderr_line = writer._ignore_stderr_line
+
+        @overrides(writer._ignore_stderr_line)
+        def _ignore_stderr_line(line):
+            if original_ignore_stderr_line(line):
+                return True
+            return 'ENGINE ' in line or 'CherryPy Checker' in line or 'has an empty config' in line
+
+        writer._ignore_stderr_line = _ignore_stderr_line
+
+        json_facade = JsonFacade(writer)
+        json_facade.write_launch(debugOptions=['DebugStdLib'])
+
+        break1_line = writer.get_line_index_with_content('break here')
+        json_facade.write_set_breakpoints(break1_line)
+
+        server_socket = writer.server_socket
+
+        class SecondaryProcessWriterThread(AbstractWriterThread):
+
+            TEST_FILE = writer.get_main_filename()
+            _sequence = -1
+
+        class SecondaryProcessThreadCommunication(threading.Thread):
+
+            def run(self):
+                from tests_python.debugger_unittest import ReaderThread
+                expected_connections = 1
+                for _ in range(expected_connections):
+                    server_socket.listen(1)
+                    self.server_socket = server_socket
+                    new_sock, addr = server_socket.accept()
+
+                    reader_thread = ReaderThread(new_sock)
+                    reader_thread.name = '  *** Multiprocess Reader Thread'
+                    reader_thread.start()
+
+                    writer2 = SecondaryProcessWriterThread()
+
+                    writer2.reader_thread = reader_thread
+                    writer2.sock = new_sock
+
+                    writer2.write_version()
+                    writer2.write_add_breakpoint(break1_line)
+                    writer2.write_make_initial_run()
+
+                # Give it some time to startup
+                time.sleep(2)
+                t = writer.create_request_thread('http://127.0.0.1:%s/' % (port,))
+                t.start()
+
+                hit = writer2.wait_for_breakpoint_hit()
+                writer2.write_run_thread(hit.thread_id)
+
+                contents = t.wait_for_contents()
+                assert 'Hello World NEW!' in contents
+
+                t = writer.create_request_thread('http://127.0.0.1:%s/exit' % (port,))
+                t.start()
+
+        secondary_process_thread_communication = SecondaryProcessThreadCommunication()
+        secondary_process_thread_communication.start()
+        json_facade.write_make_initial_run()
+
+        # Give it some time to startup
+        time.sleep(2)
+
+        t = writer.create_request_thread('http://127.0.0.1:%s/' % (port,))
+        t.start()
+        json_facade.wait_for_thread_stopped()
+        json_facade.write_continue()
+
+        contents = t.wait_for_contents()
+        assert 'Hello World INITIAL!' in contents
+
+        # Sleep a bit more to make sure that the initial timestamp was gotten in the
+        # CherryPy background thread.
+        time.sleep(2)
+        f.write(tmplt % dict(port=port, str='NEW'))
+
+        secondary_process_thread_communication.join(10)
+        if secondary_process_thread_communication.is_alive():
+            raise AssertionError('The SecondaryProcessThreadCommunication did not finish')
+        writer.finished_ok = True
+
+
+@pytest.mark.skipif(IS_PY26, reason='Flaky on Python 2.6.')
 def test_wait_for_attach(case_setup_remote_attach_to):
     host_port = get_socket_name(close=True)
 
@@ -2183,6 +2690,7 @@ def test_wait_for_attach(case_setup_remote_attach_to):
         assert next(iter(process_events)).body.startMethod == start_method
 
     with case_setup_remote_attach_to.test_file('_debugger_case_wait_for_attach.py', host_port[1]) as writer:
+        writer.TEST_FILE = debugger_unittest._get_debugger_test_file('_debugger_case_wait_for_attach_impl.py')
         time.sleep(.5)  # Give some time for it to pass the first breakpoint and wait in 'wait_for_attach'.
         writer.start_socket_client(*host_port)
 
@@ -2236,7 +2744,7 @@ def test_wait_for_attach(case_setup_remote_attach_to):
         # Change value of 'a' for test to finish.
         json_facade.write_set_variable(json_hit.frame_id, 'a', '10')
 
-        json_facade.write_disconnect(wait_for_response=False)
+        json_facade.write_disconnect()
         writer.finished_ok = True
 
 
@@ -2320,7 +2828,7 @@ def test_path_translation_and_source_reference(case_setup):
             pydevd_schema.SourceRequest(pydevd_schema.SourceArguments(source_reference))))
         assert "def call_me_back1(callback):" in response.body.content
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -2384,13 +2892,14 @@ def test_source_reference_no_file(case_setup, tmpdir):
         assert response.success
         assert response.body.content == 'foo()\n'
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
 @pytest.mark.skipif(not TEST_DJANGO, reason='No django available')
 @pytest.mark.parametrize("jmc", [False, True])
 def test_case_django_no_attribute_exception_breakpoint(case_setup_django, jmc):
+    import django  # noqa (may not be there if TEST_DJANGO == False)
     django_version = [int(x) for x in django.get_version().split('.')][:2]
 
     if django_version < [2, 1]:
@@ -2442,7 +2951,7 @@ def test_case_django_no_attribute_exception_breakpoint(case_setup_django, jmc):
             {'name': 'val', 'value': "'v1'", 'type': 'str', 'evaluateName': 'entry.val', 'presentationHint': {'attributes': ['rawString']}, 'variablesReference': 0}
         ]
 
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
         writer.finished_ok = True
 
 
@@ -2473,7 +2982,7 @@ def test_case_flask_exceptions(case_setup_flask, jmc):
         t.start()
 
         json_facade.wait_for_thread_stopped('exception', line=8, file='bad.html')
-        json_facade.write_continue(wait_for_response=False)
+        json_facade.write_continue()
 
         writer.finished_ok = True
 
@@ -2496,16 +3005,23 @@ def test_redirect_output(case_setup):
         def _ignore_stderr_line(line):
             if original_ignore_stderr_line(line):
                 return True
+
+            binary_junk = b'\xe8\xF0\x80\x80\x80'
+            if sys.version_info[0] >= 3:
+                binary_junk = binary_junk.decode('utf-8', 'replace')
+
             return line.startswith((
                 'text',
                 'binary',
-                'a'
+                'a',
+                binary_junk,
             ))
 
         writer._ignore_stderr_line = _ignore_stderr_line
 
         # Note: writes to stdout and stderr are now synchronous (so, the order
         # must always be consistent and there's a message for each write).
+
         expected = [
             'text\n',
             'binary or text\n',
@@ -2518,6 +3034,11 @@ def test_redirect_output(case_setup):
                 'ação2\n'.encode(encoding='latin1').decode('utf-8', 'replace'),
                 'ação3\n',
             ))
+
+        binary_junk = '\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\n\n'
+        if sys.version_info[0] >= 3:
+            binary_junk = "\ufffd\ufffd\ufffd\ufffd\ufffd\n\n"
+        expected.append(binary_junk)
 
         new_expected = [(x, 'stdout') for x in expected]
         new_expected.extend([(x, 'stderr') for x in expected])
@@ -2533,9 +3054,9 @@ def test_redirect_output(case_setup):
                 output = output_event.body.output
                 category = output_event.body.category
                 if IS_PY2:
-                    if isinstance(output, unicode):
+                    if isinstance(output, unicode):  # noqa -- unicode not available in py3
                         output = output.encode('utf-8')
-                    if isinstance(category, unicode):
+                    if isinstance(category, unicode):  # noqa -- unicode not available in py3
                         category = category.encode('utf-8')
                 msg = (output, category)
             except Exception:
@@ -2555,6 +3076,268 @@ def test_redirect_output(case_setup):
             print(msgs)
             print(new_expected)
         assert msgs == new_expected
+        writer.finished_ok = True
+
+
+def test_listen_dap_messages(case_setup):
+
+    with case_setup.test_file('_debugger_case_listen_dap_messages.py') as writer:
+        json_facade = JsonFacade(writer)
+        json_facade.write_launch(debugOptions=['RedirectOutput'],)
+
+        writer.write_add_breakpoint(writer.get_line_index_with_content('Break here'))
+        json_facade.write_make_initial_run()
+
+        json_facade.wait_for_thread_stopped()
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+def _attach_to_writer_pid(writer):
+    import pydevd
+    import threading
+    import subprocess
+
+    assert writer.process is not None
+
+    def attach():
+        attach_pydevd_file = os.path.join(os.path.dirname(pydevd.__file__), 'pydevd_attach_to_process', 'attach_pydevd.py')
+        subprocess.call([sys.executable, attach_pydevd_file, '--pid', str(writer.process.pid), '--port', str(writer.port), '--protocol', 'http_json'])
+
+    threading.Thread(target=attach).start()
+
+    wait_for_condition(lambda: writer.finished_initialization)
+
+
+@pytest.mark.parametrize('reattach', [True, False])
+@pytest.mark.skipif(not IS_CPYTHON, reason='Attach to pid only available in CPython.')
+def test_attach_to_pid(case_setup_remote, reattach):
+    import threading
+
+    with case_setup_remote.test_file('_debugger_case_attach_to_pid_simple.py', wait_for_port=False) as writer:
+        time.sleep(1)  # Give it some time to initialize to get to the while loop.
+        _attach_to_writer_pid(writer)
+        json_facade = JsonFacade(writer)
+
+        bp_line = writer.get_line_index_with_content('break here')
+        json_facade.write_set_breakpoints(bp_line)
+        json_facade.write_make_initial_run()
+
+        json_hit = json_facade.wait_for_thread_stopped(line=bp_line)
+
+        if reattach:
+            # This would be the same as a second attach to pid, so, the idea is closing the current
+            # connection and then doing a new attach to pid.
+            json_facade.write_set_breakpoints([])
+            json_facade.write_continue()
+
+            writer.do_kill()  # This will simply close the open sockets without doing anything else.
+            time.sleep(1)
+
+            t = threading.Thread(target=writer.start_socket)
+            t.start()
+            wait_for_condition(lambda: hasattr(writer, 'port'))
+            time.sleep(1)
+            writer.process = writer.process
+            _attach_to_writer_pid(writer)
+            wait_for_condition(lambda: hasattr(writer, 'reader_thread'))
+            time.sleep(1)
+
+            json_facade = JsonFacade(writer)
+            json_facade.write_set_breakpoints(bp_line)
+            json_facade.write_make_initial_run()
+
+            json_hit = json_facade.wait_for_thread_stopped(line=bp_line)
+
+        json_facade.write_set_variable(json_hit.frame_id, 'wait', '0')
+
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+def test_remote_debugger_basic(case_setup_remote):
+    with case_setup_remote.test_file('_debugger_case_remote.py') as writer:
+        json_facade = JsonFacade(writer)
+        json_facade.write_launch()
+        json_facade.write_make_initial_run()
+        json_facade.wait_for_thread_stopped()
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+PYDEVD_CUSTOMIZATION_COMMAND_LINE_ARGS = ['', '--use-c-switch']
+if hasattr(os, 'posix_spawn'):
+    PYDEVD_CUSTOMIZATION_COMMAND_LINE_ARGS.append('--posix-spawn')
+
+
+@pytest.mark.parametrize('command_line_args', PYDEVD_CUSTOMIZATION_COMMAND_LINE_ARGS)
+def test_subprocess_pydevd_customization(case_setup_remote, command_line_args):
+    import threading
+    from tests_python.debugger_unittest import AbstractWriterThread
+
+    with case_setup_remote.test_file(
+            '_debugger_case_pydevd_customization.py',
+            append_command_line_args=command_line_args if command_line_args else [],
+        ) as writer:
+        json_facade = JsonFacade(writer, send_json_startup_messages=False)
+        json_facade.writer.write_multi_threads_single_notification(True)
+        json_facade.write_launch()
+
+        break1_line = writer.get_line_index_with_content('break 1 here')
+        break2_line = writer.get_line_index_with_content('break 2 here')
+        json_facade.write_set_breakpoints([break1_line, break2_line])
+
+        server_socket = writer.server_socket
+
+        class SecondaryProcessWriterThread(AbstractWriterThread):
+
+            TEST_FILE = writer.get_main_filename()
+            _sequence = -1
+
+        class SecondaryProcessThreadCommunication(threading.Thread):
+
+            def run(self):
+                from tests_python.debugger_unittest import ReaderThread
+                expected_connections = 1
+
+                for _ in range(expected_connections):
+                    server_socket.listen(1)
+                    self.server_socket = server_socket
+                    writer.log.append('  *** Multiprocess waiting on server_socket.accept()')
+                    new_sock, addr = server_socket.accept()
+                    writer.log.append('  *** Multiprocess completed server_socket.accept()')
+
+                    reader_thread = ReaderThread(new_sock)
+                    reader_thread.name = '  *** Multiprocess Reader Thread'
+                    reader_thread.start()
+                    writer.log.append('  *** Multiprocess started ReaderThread')
+
+                    writer2 = SecondaryProcessWriterThread()
+                    writer2._WRITE_LOG_PREFIX = '  *** Multiprocess write: '
+                    writer2.reader_thread = reader_thread
+                    writer2.sock = new_sock
+                    json_facade2 = JsonFacade(writer2, send_json_startup_messages=False)
+                    json_facade2.writer.write_multi_threads_single_notification(True)
+
+                    json_facade2.write_set_breakpoints([break1_line, break2_line])
+                    json_facade2.write_make_initial_run()
+
+                json_facade2.wait_for_thread_stopped()
+                json_facade2.write_continue()
+
+        secondary_process_thread_communication = SecondaryProcessThreadCommunication()
+        secondary_process_thread_communication.start()
+        time.sleep(.1)
+
+        json_facade.write_make_initial_run()
+        json_facade.wait_for_thread_stopped()
+
+        json_facade.write_continue()
+        json_facade.wait_for_thread_stopped()
+        json_facade.write_continue()
+
+        secondary_process_thread_communication.join(5)
+        if secondary_process_thread_communication.is_alive():
+            raise AssertionError('The SecondaryProcessThreadCommunication did not finish')
+        writer.finished_ok = True
+
+
+@pytest.mark.parametrize('apply_multiprocessing_patch', [True, False])
+def test_no_subprocess_patching(case_setup_multiprocessing, apply_multiprocessing_patch):
+    import threading
+    from tests_python.debugger_unittest import AbstractWriterThread
+
+    def update_command_line_args(writer, args):
+        ret = debugger_unittest.AbstractWriterThread.update_command_line_args(writer, args)
+        ret.insert(ret.index('--qt-support'), '--multiprocess')
+        if apply_multiprocessing_patch:
+            ret.append('apply-multiprocessing-patch')
+        return ret
+
+    with case_setup_multiprocessing.test_file(
+            '_debugger_case_no_subprocess_patching.py',
+            update_command_line_args=update_command_line_args
+        ) as writer:
+        json_facade = JsonFacade(writer)
+        json_facade.write_launch()
+
+        break1_line = writer.get_line_index_with_content('break 1 here')
+        break2_line = writer.get_line_index_with_content('break 2 here')
+        json_facade.write_set_breakpoints([break1_line, break2_line])
+
+        server_socket = writer.server_socket
+
+        class SecondaryProcessWriterThread(AbstractWriterThread):
+
+            TEST_FILE = writer.get_main_filename()
+            _sequence = -1
+
+        class SecondaryProcessThreadCommunication(threading.Thread):
+
+            def run(self):
+                from tests_python.debugger_unittest import ReaderThread
+                expected_connections = 1
+
+                for _ in range(expected_connections):
+                    server_socket.listen(1)
+                    self.server_socket = server_socket
+                    new_sock, addr = server_socket.accept()
+
+                    reader_thread = ReaderThread(new_sock)
+                    reader_thread.name = '  *** Multiprocess Reader Thread'
+                    reader_thread.start()
+
+                    writer2 = SecondaryProcessWriterThread()
+                    writer2.reader_thread = reader_thread
+                    writer2.sock = new_sock
+                    json_facade2 = JsonFacade(writer2)
+
+                    json_facade2.write_set_breakpoints([break1_line, break2_line])
+                    json_facade2.write_make_initial_run()
+
+                json_facade2.wait_for_thread_stopped()
+                json_facade2.write_continue()
+
+        if apply_multiprocessing_patch:
+            secondary_process_thread_communication = SecondaryProcessThreadCommunication()
+            secondary_process_thread_communication.start()
+            time.sleep(.1)
+
+        json_facade.write_make_initial_run()
+        json_facade.wait_for_thread_stopped()
+        json_facade.write_continue()
+
+        if apply_multiprocessing_patch:
+            secondary_process_thread_communication.join(10)
+            if secondary_process_thread_communication.is_alive():
+                raise AssertionError('The SecondaryProcessThreadCommunication did not finish')
+        writer.finished_ok = True
+
+
+def test_module_crash(case_setup):
+    with case_setup.test_file('_debugger_case_module.py') as writer:
+        json_facade = JsonFacade(writer)
+
+        writer.write_add_breakpoint(writer.get_line_index_with_content('Break here'))
+
+        json_facade.write_make_initial_run()
+
+        stopped_event = json_facade.wait_for_json_message(StoppedEvent)
+        thread_id = stopped_event.body.threadId
+
+        json_facade.write_request(
+            pydevd_schema.StackTraceRequest(pydevd_schema.StackTraceArguments(threadId=thread_id)))
+
+        module_event = json_facade.wait_for_json_message(ModuleEvent)  # : :type module_event: ModuleEvent
+        assert 'MyName' in module_event.body.module.name
+        assert 'MyVersion' in module_event.body.module.version
+        assert 'MyPackage' in module_event.body.module.kwargs['package']
+
+        json_facade.write_continue()
+
         writer.finished_ok = True
 
 
@@ -2585,10 +3368,262 @@ def test_pydevd_systeminfo(case_setup):
         assert body['platform'] == {'name': sys.platform}
 
         assert 'pid' in body['process']
+        assert 'ppid' in body['process']
         assert body['process']['executable'] == sys.executable
         assert body['process']['bitness'] == 64 if IS_64BIT_PROCESS else 32
 
-        json_facade.write_continue(wait_for_response=False)
+        assert 'usingCython' in body['pydevd']
+        assert 'usingFrameEval' in body['pydevd']
+
+        use_cython = os.getenv('PYDEVD_USE_CYTHON')
+        if use_cython is not None:
+            using_cython = use_cython == 'YES'
+            assert body['pydevd']['usingCython'] == using_cython
+            assert body['pydevd']['usingFrameEval'] == (using_cython and IS_PY36_OR_GREATER)
+
+        json_facade.write_continue()
+
+        writer.finished_ok = True
+
+
+@pytest.mark.parametrize('scenario', [
+    'terminate_request',
+    'terminate_debugee'
+])
+@pytest.mark.parametrize('check_subprocesses', [
+    'no_subprocesses',
+    'kill_subprocesses',
+    'kill_subprocesses_ignore_pid',
+    'dont_kill_subprocesses',
+])
+def test_terminate(case_setup, scenario, check_subprocesses):
+    import psutil
+
+    def check_test_suceeded_msg(writer, stdout, stderr):
+        return 'TEST SUCEEDED' not in ''.join(stdout)
+
+    def update_command_line_args(writer, args):
+        ret = debugger_unittest.AbstractWriterThread.update_command_line_args(writer, args)
+        if check_subprocesses in ('kill_subprocesses', 'dont_kill_subprocesses'):
+            ret.append('check-subprocesses')
+        if check_subprocesses in ('kill_subprocesses_ignore_pid',):
+            ret.append('check-subprocesses-ignore-pid')
+        return ret
+
+    with case_setup.test_file(
+        '_debugger_case_terminate.py',
+        check_test_suceeded_msg=check_test_suceeded_msg,
+        update_command_line_args=update_command_line_args,
+        EXPECTED_RETURNCODE='any' if check_subprocesses == 'kill_subprocesses_ignore_pid' else 0,
+        ) as writer:
+        json_facade = JsonFacade(writer)
+        if check_subprocesses == 'dont_kill_subprocesses':
+            json_facade.write_launch(terminateChildProcesses=False)
+
+        json_facade.write_make_initial_run()
+        response = json_facade.write_initialize()
+        pid = response.to_dict()['body']['pydevd']['processId']
+
+        if check_subprocesses in ('kill_subprocesses', 'dont_kill_subprocesses', 'kill_subprocesses_ignore_pid'):
+            process_ids_to_check = [pid]
+            p = psutil.Process(pid)
+
+            def wait_for_child_processes():
+                children = p.children(recursive=True)
+                found = len(children)
+                if found == 8:
+                    process_ids_to_check.extend([x.pid for x in children])
+                    return True
+                return False
+
+            wait_for_condition(wait_for_child_processes)
+
+        if scenario == 'terminate_request':
+            json_facade.write_terminate()
+        elif scenario == 'terminate_debugee':
+            json_facade.write_disconnect(terminate_debugee=True)
+        else:
+            raise AssertionError('Unexpected: %s' % (scenario,))
+        json_facade.wait_for_terminated()
+
+        if check_subprocesses in ('kill_subprocesses', 'dont_kill_subprocesses', 'kill_subprocesses_ignore_pid'):
+
+            def is_pid_alive(pid):
+                # Note: the process may be a zombie process in Linux
+                # (althought it's killed it remains in that state
+                # because we're monitoring it).
+                try:
+                    proc = psutil.Process(pid)
+                    if proc.status() == psutil.STATUS_ZOMBIE:
+                        return False
+                except psutil.NoSuchProcess:
+                    return False
+                return True
+
+            def get_live_pids():
+                return [pid for pid in process_ids_to_check if is_pid_alive(pid)]
+
+            if check_subprocesses == 'kill_subprocesses':
+
+                def all_pids_exited():
+                    live_pids = get_live_pids()
+                    if live_pids:
+                        return False
+
+                    return True
+
+                wait_for_condition(all_pids_exited)
+
+            elif check_subprocesses == 'kill_subprocesses_ignore_pid':
+
+                def all_pids_exited():
+                    live_pids = get_live_pids()
+                    if len(live_pids) == 1:
+                        return False
+
+                    return True
+
+                wait_for_condition(all_pids_exited)
+
+                # Now, let's kill the remaining process ourselves.
+                for pid in get_live_pids():
+                    proc = psutil.Process(pid)
+                    proc.kill()
+
+            else:  # 'dont_kill_subprocesses'
+                time.sleep(1)
+
+                def only_main_pid_exited():
+                    live_pids = get_live_pids()
+                    if len(live_pids) == len(process_ids_to_check) - 1:
+                        return True
+
+                    return False
+
+                wait_for_condition(only_main_pid_exited)
+
+                # Now, let's kill the remaining processes ourselves.
+                for pid in get_live_pids():
+                    proc = psutil.Process(pid)
+                    proc.kill()
+
+        writer.finished_ok = True
+
+
+def test_access_token(case_setup):
+
+    def update_command_line_args(self, args):
+        args.insert(1, '--json-dap-http')
+        args.insert(2, '--access-token')
+        args.insert(3, 'bar123')
+        args.insert(4, '--client-access-token')
+        args.insert(5, 'foo321')
+        return args
+
+    with case_setup.test_file('_debugger_case_pause_continue.py', update_command_line_args=update_command_line_args) as writer:
+        json_facade = JsonFacade(writer, send_json_startup_messages=False)
+
+        response = json_facade.write_set_debugger_property(multi_threads_single_notification=True, success=False)
+        assert response.message == "Client not authenticated."
+
+        response = json_facade.write_authorize(access_token='wrong', success=False)
+        assert response.message == "Client not authenticated."
+
+        response = json_facade.write_set_debugger_property(multi_threads_single_notification=True, success=False)
+        assert response.message == "Client not authenticated."
+
+        authorize_response = json_facade.write_authorize(access_token='bar123', success=True)
+        # : :type authorize_response:PydevdAuthorizeResponse
+        assert authorize_response.body.clientAccessToken == 'foo321'
+
+        json_facade.write_set_debugger_property(multi_threads_single_notification=True)
+        json_facade.write_launch()
+
+        break_line = writer.get_line_index_with_content('Pause here and change loop to False')
+        json_facade.write_set_breakpoints(break_line)
+        json_facade.write_make_initial_run()
+
+        json_facade.wait_for_json_message(ThreadEvent, lambda event: event.body.reason == 'started')
+        json_facade.wait_for_thread_stopped(line=break_line)
+
+        # : :type response: ThreadsResponse
+        response = json_facade.write_list_threads()
+        assert len(response.body.threads) == 1
+        assert next(iter(response.body.threads))['name'] == 'MainThread'
+
+        json_facade.write_disconnect()
+
+        response = json_facade.write_authorize(access_token='wrong', success=False)
+        assert response.message == "Client not authenticated."
+
+        authorize_response = json_facade.write_authorize(access_token='bar123')
+        assert authorize_response.body.clientAccessToken == 'foo321'
+
+        json_facade.write_set_breakpoints(break_line)
+        json_hit = json_facade.wait_for_thread_stopped(line=break_line)
+        json_facade.write_set_variable(json_hit.frame_id, 'loop', 'False')
+        json_facade.write_continue()
+        json_facade.wait_for_terminated()
+
+        writer.finished_ok = True
+
+
+@pytest.mark.parametrize('val', [True, False])
+def test_debug_options(case_setup, val):
+    with case_setup.test_file('_debugger_case_debug_options.py') as writer:
+        json_facade = JsonFacade(writer)
+        args = dict(
+            debugStdLib=val,
+            redirectOutput=True,  # Always redirect the output regardless of other values.
+            showReturnValue=val,
+            breakOnSystemExitZero=val,
+            django=val,
+            flask=val,
+            stopOnEntry=val,
+            maxExceptionStackFrames=4 if val else 5,
+        )
+        json_facade.write_launch(**args)
+
+        json_facade.write_make_initial_run()
+        if args['stopOnEntry']:
+            json_facade.wait_for_thread_stopped('entry')
+            json_facade.write_continue()
+
+        output = json_facade.wait_for_json_message(
+            OutputEvent, lambda msg: msg.body.category == 'stdout' and msg.body.output.startswith('{')and msg.body.output.endswith('}'))
+
+        # The values printed are internal values from _pydevd_bundle.pydevd_json_debug_options.DebugOptions,
+        # not the parameters we passed.
+        translation = {
+            'django': 'django_debug',
+            'flask': 'flask_debug',
+            'debugStdLib': 'debug_stdlib',
+            'redirectOutput': 'redirect_output',
+            'showReturnValue': 'show_return_value',
+            'breakOnSystemExitZero': 'break_system_exit_zero',
+            'stopOnEntry': 'stop_on_entry',
+            'maxExceptionStackFrames': 'max_exception_stack_frames',
+        }
+
+        assert json.loads(output.body.output) == dict((translation[key], val) for key, val in args.items())
+        json_facade.wait_for_terminated()
+        writer.finished_ok = True
+
+
+def test_send_json_message(case_setup):
+
+    with case_setup.test_file('_debugger_case_custom_message.py') as writer:
+        json_facade = JsonFacade(writer)
+
+        json_facade.write_launch()
+
+        json_facade.write_make_initial_run()
+
+        json_facade.wait_for_json_message(
+            OutputEvent, lambda msg: msg.body.category == 'my_category' and msg.body.output == 'some output')
+
+        json_facade.wait_for_json_message(
+            OutputEvent, lambda msg: msg.body.category == 'my_category2' and msg.body.output == 'some output 2')
 
         writer.finished_ok = True
 

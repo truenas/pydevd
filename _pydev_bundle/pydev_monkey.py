@@ -2,10 +2,12 @@
 import os
 import re
 import sys
-import traceback
 from _pydev_imps._pydev_saved_modules import threading
-from _pydevd_bundle.pydevd_constants import get_global_debugger, IS_WINDOWS, IS_JYTHON, get_current_thread_id
+from _pydevd_bundle.pydevd_constants import get_global_debugger, IS_WINDOWS, IS_JYTHON, get_current_thread_id, \
+    NULL
 from _pydev_bundle import pydev_log
+from contextlib import contextmanager
+from _pydevd_bundle import pydevd_constants
 
 try:
     xrange
@@ -18,16 +20,63 @@ except:
 
 pydev_src_dir = os.path.dirname(os.path.dirname(__file__))
 
+_arg_patch = threading.local()
+
+
+@contextmanager
+def skip_subprocess_arg_patch():
+    _arg_patch.apply_arg_patching = False
+    try:
+        yield
+    finally:
+        _arg_patch.apply_arg_patching = True
+
+
+def _get_apply_arg_patching():
+    return getattr(_arg_patch, 'apply_arg_patching', True)
+
+
+def _get_setup_updated_with_protocol(setup):
+    if setup is None:
+        setup = {}
+    setup = setup.copy()
+    # Discard anything related to the protocol (we'll set the the protocol based on the one
+    # currently set).
+    setup.pop(pydevd_constants.ARGUMENT_HTTP_JSON_PROTOCOL, None)
+    setup.pop(pydevd_constants.ARGUMENT_JSON_PROTOCOL, None)
+    setup.pop(pydevd_constants.ARGUMENT_QUOTED_LINE_PROTOCOL, None)
+    setup.pop(pydevd_constants.ARGUMENT_HTTP_PROTOCOL, None)
+
+    protocol = pydevd_constants.get_protocol()
+    if protocol == pydevd_constants.HTTP_JSON_PROTOCOL:
+        setup[pydevd_constants.ARGUMENT_HTTP_JSON_PROTOCOL] = True
+
+    elif protocol == pydevd_constants.JSON_PROTOCOL:
+        setup[pydevd_constants.ARGUMENT_JSON_PROTOCOL] = True
+
+    elif protocol == pydevd_constants.QUOTED_LINE_PROTOCOL:
+        setup[pydevd_constants.ARGUMENT_QUOTED_LINE_PROTOCOL] = True
+
+    elif protocol == pydevd_constants.HTTP_PROTOCOL:
+        setup[pydevd_constants.ARGUMENT_HTTP_PROTOCOL] = True
+
+    else:
+        pydev_log.debug('Unexpected protocol: %s', protocol)
+    return setup
+
 
 def _get_python_c_args(host, port, indC, args, setup):
-    host_literal = "'" + host + "'" if host is not None else 'None'
-    return ("import sys; sys.path.append(r'%s'); import pydevd; "
-            "pydevd.settrace(host=%s, port=%s, suspend=False, trace_only_current_thread=False, patch_multiprocessing=True); "
+    setup = _get_setup_updated_with_protocol(setup)
+    return ("import sys; sys.path.insert(0, r'%s'); import pydevd; pydevd.PydevdCustomization.DEFAULT_PROTOCOL=%r; "
+            "pydevd.settrace(host=%r, port=%s, suspend=False, trace_only_current_thread=False, patch_multiprocessing=True, access_token=%r, client_access_token=%r); "
             "from pydevd import SetupHolder; SetupHolder.setup = %s; %s"
             ) % (
                pydev_src_dir,
-               host_literal,
+               pydevd_constants.get_protocol(),
+               host,
                port,
+               setup.get('access-token'),
+               setup.get('client-access-token'),
                setup,
                args[indC + 1])
 
@@ -44,10 +93,16 @@ def _is_managed_arg(arg):
     return False
 
 
-def _on_forked_process():
+def _on_forked_process(setup_tracing=True):
+    pydevd_constants.after_fork()
+    pydev_log.initialize_debug_stream(reinitialize=True)
+
+    if setup_tracing:
+        pydev_log.debug('pydevd on forked process: %s', os.getpid())
+
     import pydevd
     pydevd.threadingCurrentThread().__pydevd_main_thread = True
-    pydevd.settrace_forked()
+    pydevd.settrace_forked(setup_tracing=setup_tracing)
 
 
 def _on_set_trace_for_new_thread(global_debugger):
@@ -189,7 +244,7 @@ def patch_args(args):
         # ['X:\\pysrc\\pydevd.py', '--multiprocess', '--print-in-debugger-startup',
         #  '--vm_type', 'python', '--client', '127.0.0.1', '--port', '56352', '--file', 'x:\\snippet1.py']
         from _pydevd_bundle.pydevd_command_line_handling import setup_to_argv
-        original = setup_to_argv(SetupHolder.setup) + ['--file']
+        original = setup_to_argv(_get_setup_updated_with_protocol(SetupHolder.setup)) + ['--file']
         while i < len(args):
             if args[i] == '-m':
                 # Always insert at pos == 1 (i.e.: pydevd "--module" --multiprocess ...)
@@ -338,12 +393,12 @@ def warn_multiproc():
 
 def create_warn_multiproc(original_name):
 
-    def new_warn_multiproc(*args):
+    def new_warn_multiproc(*args, **kwargs):
         import os
 
         warn_multiproc()
 
-        return getattr(os, original_name)(*args)
+        return getattr(os, original_name)(*args, **kwargs)
 
     return new_warn_multiproc
 
@@ -357,9 +412,10 @@ def create_execl(original_name):
         os.execlp(file, arg0, arg1, ...)
         os.execlpe(file, arg0, arg1, ..., env)
         """
-        import os
-        args = patch_args(args)
-        send_process_created_message()
+        if _get_apply_arg_patching():
+            args = patch_args(args)
+            send_process_created_message()
+
         return getattr(os, original_name)(path, *args)
 
     return new_execl
@@ -372,9 +428,11 @@ def create_execv(original_name):
         os.execv(path, args)
         os.execvp(file, args)
         """
-        import os
-        send_process_created_message()
-        return getattr(os, original_name)(path, patch_args(args))
+        if _get_apply_arg_patching():
+            args = patch_args(args)
+            send_process_created_message()
+
+        return getattr(os, original_name)(path, args)
 
     return new_execv
 
@@ -386,9 +444,11 @@ def create_execve(original_name):
     """
 
     def new_execve(path, args, env):
-        import os
-        send_process_created_message()
-        return getattr(os, original_name)(path, patch_args(args), env)
+        if _get_apply_arg_patching():
+            args = patch_args(args)
+            send_process_created_message()
+
+        return getattr(os, original_name)(path, args, env)
 
     return new_execve
 
@@ -400,9 +460,10 @@ def create_spawnl(original_name):
         os.spawnl(mode, path, arg0, arg1, ...)
         os.spawnlp(mode, file, arg0, arg1, ...)
         """
-        import os
-        args = patch_args(args)
-        send_process_created_message()
+        if _get_apply_arg_patching():
+            args = patch_args(args)
+            send_process_created_message()
+
         return getattr(os, original_name)(mode, path, *args)
 
     return new_spawnl
@@ -415,9 +476,11 @@ def create_spawnv(original_name):
         os.spawnv(mode, path, args)
         os.spawnvp(mode, file, args)
         """
-        import os
-        send_process_created_message()
-        return getattr(os, original_name)(mode, path, patch_args(args))
+        if _get_apply_arg_patching():
+            args = patch_args(args)
+            send_process_created_message()
+
+        return getattr(os, original_name)(mode, path, args)
 
     return new_spawnv
 
@@ -429,11 +492,28 @@ def create_spawnve(original_name):
     """
 
     def new_spawnve(mode, path, args, env):
-        import os
-        send_process_created_message()
-        return getattr(os, original_name)(mode, path, patch_args(args), env)
+        if _get_apply_arg_patching():
+            args = patch_args(args)
+            send_process_created_message()
+
+        return getattr(os, original_name)(mode, path, args, env)
 
     return new_spawnve
+
+
+def create_posix_spawn(original_name):
+    """
+    os.posix_spawn(executable, args, env, **kwargs)
+    """
+
+    def new_posix_spawn(executable, args, env, **kwargs):
+        if _get_apply_arg_patching():
+            args = patch_args(args)
+            send_process_created_message()
+
+        return getattr(os, original_name)(executable, args, env, **kwargs)
+
+    return new_posix_spawn
 
 
 def create_fork_exec(original_name):
@@ -443,8 +523,10 @@ def create_fork_exec(original_name):
 
     def new_fork_exec(args, *other_args):
         import _posixsubprocess  # @UnresolvedImport
-        args = patch_args(args)
-        send_process_created_message()
+        if _get_apply_arg_patching():
+            args = patch_args(args)
+            send_process_created_message()
+
         return getattr(_posixsubprocess, original_name)(args, *other_args)
 
     return new_fork_exec
@@ -476,8 +558,12 @@ def create_CreateProcess(original_name):
             import _subprocess
         except ImportError:
             import _winapi as _subprocess
-        send_process_created_message()
-        return getattr(_subprocess, original_name)(app_name, patch_arg_str_win(cmd_line), *args)
+
+        if _get_apply_arg_patching():
+            cmd_line = patch_arg_str_win(cmd_line)
+            send_process_created_message()
+
+        return getattr(_subprocess, original_name)(app_name, cmd_line, *args)
 
     return new_CreateProcess
 
@@ -501,14 +587,16 @@ def create_CreateProcessWarnMultiproc(original_name):
 def create_fork(original_name):
 
     def new_fork():
-        import os
-
         # A simple fork will result in a new python process
         is_new_python_process = True
         frame = sys._getframe()
 
+        apply_arg_patch = _get_apply_arg_patching()
+
+        is_subprocess_fork = False
         while frame is not None:
             if frame.f_code.co_name == '_execute_child' and 'subprocess' in frame.f_code.co_filename:
+                is_subprocess_fork = True
                 # If we're actually in subprocess.Popen creating a child, it may
                 # result in something which is not a Python process, (so, we
                 # don't want to connect with it in the forked version).
@@ -525,7 +613,7 @@ def create_fork(original_name):
         child_process = getattr(os, original_name)()  # fork
         if not child_process:
             if is_new_python_process:
-                _on_forked_process()
+                _on_forked_process(setup_tracing=apply_arg_patch and not is_subprocess_fork)
         else:
             if is_new_python_process:
                 send_process_created_message()
@@ -535,9 +623,9 @@ def create_fork(original_name):
 
 
 def send_process_created_message():
-    debugger = get_global_debugger()
-    if debugger is not None:
-        debugger.send_process_created_message()
+    py_db = get_global_debugger()
+    if py_db is not None:
+        py_db.send_process_created_message()
 
 
 def patch_new_process_functions():
@@ -575,6 +663,7 @@ def patch_new_process_functions():
     monkey_patch_os('spawnve', create_spawnve)
     monkey_patch_os('spawnvp', create_spawnv)
     monkey_patch_os('spawnvpe', create_spawnve)
+    monkey_patch_os('posix_spawn', create_posix_spawn)
 
     if not IS_JYTHON:
         if not IS_WINDOWS:
@@ -610,6 +699,7 @@ def patch_new_process_functions_with_warning():
     monkey_patch_os('spawnve', create_warn_multiproc)
     monkey_patch_os('spawnvp', create_warn_multiproc)
     monkey_patch_os('spawnvpe', create_warn_multiproc)
+    monkey_patch_os('posix_spawn', create_warn_multiproc)
 
     if not IS_JYTHON:
         if not IS_WINDOWS:
@@ -638,10 +728,10 @@ class _NewThreadStartupWithTrace:
     def __call__(self):
         # We monkey-patch the thread creation so that this function is called in the new thread. At this point
         # we notify of its creation and start tracing it.
-        global_debugger = get_global_debugger()
+        py_db = get_global_debugger()
 
         thread_id = None
-        if global_debugger is not None:
+        if py_db is not None:
             # Note: if this is a thread from threading.py, we're too early in the boostrap process (because we mocked
             # the start_new_thread internal machinery and thread._bootstrap has not finished), so, the code below needs
             # to make sure that we use the current thread bound to the original function and not use
@@ -654,20 +744,20 @@ class _NewThreadStartupWithTrace:
 
             if not getattr(t, 'is_pydev_daemon_thread', False):
                 thread_id = get_current_thread_id(t)
-                global_debugger.notify_thread_created(thread_id, t)
-                _on_set_trace_for_new_thread(global_debugger)
+                py_db.notify_thread_created(thread_id, t)
+                _on_set_trace_for_new_thread(py_db)
 
-            if getattr(global_debugger, 'thread_analyser', None) is not None:
+            if getattr(py_db, 'thread_analyser', None) is not None:
                 try:
                     from pydevd_concurrency_analyser.pydevd_concurrency_logger import log_new_thread
-                    log_new_thread(global_debugger, t)
+                    log_new_thread(py_db, t)
                 except:
                     sys.stderr.write("Failed to detect new thread for visualization")
         try:
             ret = self.original_func(*self.args, **self.kwargs)
         finally:
             if thread_id is not None:
-                global_debugger.notify_thread_not_alive(thread_id)
+                py_db.notify_thread_not_alive(thread_id)
 
         return ret
 
