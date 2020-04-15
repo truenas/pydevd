@@ -4,8 +4,9 @@ from _pydevd_bundle.pydevd_comm import pydevd_find_thread_by_id
 from _pydevd_bundle.pydevd_utils import convert_dap_log_message_to_expression
 from tests_python.debug_constants import IS_PY26, IS_PY3K
 import sys
-from _pydevd_bundle.pydevd_constants import IS_CPYTHON
+from _pydevd_bundle.pydevd_constants import IS_CPYTHON, IS_WINDOWS
 import pytest
+import os
 
 
 def test_is_main_thread():
@@ -162,6 +163,36 @@ def test_pydevd_log():
     assert stream.getvalue() == 'always %s %s - (1,)\n'
 
 
+def test_pydevd_logging_files(tmpdir):
+    from _pydev_bundle import pydev_log
+    from _pydevd_bundle.pydevd_constants import DebugInfoHolder
+    import os.path
+    from _pydev_bundle.pydev_log import _LoggingGlobals
+
+    try:
+        import StringIO as io
+    except:
+        import io
+    from _pydev_bundle.pydev_log import log_context
+
+    stream = io.StringIO()
+    with log_context(0, stream=stream):
+        d1 = str(tmpdir.join('d1'))
+        d2 = str(tmpdir.join('d2'))
+
+        for d in (d1, d2):
+            DebugInfoHolder.PYDEVD_DEBUG_FILE = os.path.join(d, 'file.txt')
+            pydev_log.initialize_debug_stream(reinitialize=True)
+
+            assert os.path.normpath(_LoggingGlobals._debug_stream_filename) == \
+                os.path.normpath(os.path.join(d, 'file.%s.txt' % os.getpid()))
+
+            assert os.path.exists(_LoggingGlobals._debug_stream_filename)
+
+            assert pydev_log.list_log_files(DebugInfoHolder.PYDEVD_DEBUG_FILE) == [
+                _LoggingGlobals._debug_stream_filename]
+
+
 def _check_tracing_other_threads():
     import pydevd_tracing
     import time
@@ -170,6 +201,18 @@ def _check_tracing_other_threads():
         import _thread
     except ImportError:
         import thread as _thread
+
+    # This method is called in a subprocess, so, make sure we exit properly even if we somehow
+    # deadlock somewhere else.
+    def dump_threads_and_kill_on_timeout():
+        time.sleep(10)
+        from _pydevd_bundle import pydevd_utils
+        pydevd_utils.dump_threads()
+        time.sleep(1)
+        import os
+        os._exit(77)
+
+    _thread.start_new_thread(dump_threads_and_kill_on_timeout, ())
 
     def method():
         while True:
@@ -185,6 +228,7 @@ def _check_tracing_other_threads():
 
     threads = []
     threads.append(threading.Thread(target=method))
+    threads[-1].daemon = True
     threads[-1].start()
     _thread.start_new_thread(dummy_thread_method, ())
 
@@ -262,7 +306,6 @@ def test_find_main_thread_id():
     _check_in_separate_process('check_fix_main_thread_id_multiple_threads', '_pydevd_test_find_main_thread_id')
 
     import subprocess
-    import os
     import pydevd
     cwd, environ = _build_launch_env()
 
@@ -279,3 +322,17 @@ def test_find_main_thread_id():
         env=environ,
         cwd=cwd
     )
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason='Windows-only test.')
+def test_get_ppid():
+    from _pydevd_bundle.pydevd_api import PyDevdAPI
+    api = PyDevdAPI()
+    if IS_PY3K:
+        # On python 3 we can check that our internal api which is used for Python 2 gives the
+        # same result as os.getppid.
+        ppid = os.getppid()
+        assert api._get_windows_ppid() == ppid
+    else:
+        assert api._get_windows_ppid() is not None
+

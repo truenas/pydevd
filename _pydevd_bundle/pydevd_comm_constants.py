@@ -85,6 +85,10 @@ CMD_SET_PROJECT_ROOTS = 202
 CMD_MODULE_EVENT = 203
 CMD_PROCESS_EVENT = 204
 
+CMD_AUTHENTICATE = 205
+
+CMD_STEP_INTO_COROUTINE = 206
+
 CMD_VERSION = 501
 CMD_RETURN = 502
 CMD_SET_PROTOCOL = 503
@@ -171,8 +175,19 @@ ID_TO_MEANING = {
     '203': 'CMD_MODULE_EVENT',
     '204': 'CMD_PROCESS_EVENT',  # DAP process event.
 
+    '205': 'CMD_AUTHENTICATE',
+
+    '206': 'CMD_STEP_INTO_COROUTINE',
+
     '501': 'CMD_VERSION',
     '502': 'CMD_RETURN',
     '503': 'CMD_SET_PROTOCOL',
     '901': 'CMD_ERROR',
 }
+
+
+def constant_to_str(constant):
+    s = ID_TO_MEANING.get(str(constant))
+    if not s:
+        s = '<Unknown: %s>' % (constant,)
+    return s

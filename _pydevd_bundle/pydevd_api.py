@@ -11,17 +11,20 @@ from _pydevd_bundle.pydevd_comm import (InternalGetThreadStack, internal_get_com
     internal_get_description, internal_get_frame, internal_evaluate_expression, InternalConsoleExec,
     internal_get_variable_json, internal_change_variable, internal_change_variable_json,
     internal_evaluate_expression_json, internal_set_expression_json, internal_get_exception_details_json,
-    internal_step_in_thread, internal_run_thread)
+    internal_step_in_thread, internal_run_thread, run_as_pydevd_daemon_thread)
 from _pydevd_bundle.pydevd_comm_constants import (CMD_THREAD_SUSPEND, file_system_encoding,
     CMD_STEP_INTO_MY_CODE, CMD_STOP_ON_START)
 from _pydevd_bundle.pydevd_constants import (get_current_thread_id, set_protocol, get_protocol,
-    HTTP_JSON_PROTOCOL, JSON_PROTOCOL, IS_PY3K, DebugInfoHolder, dict_keys, dict_items)
+    HTTP_JSON_PROTOCOL, JSON_PROTOCOL, IS_PY3K, DebugInfoHolder, dict_keys, dict_items, IS_WINDOWS)
 from _pydevd_bundle.pydevd_net_command_factory_json import NetCommandFactoryJson
 from _pydevd_bundle.pydevd_net_command_factory_xml import NetCommandFactory
 import pydevd_file_utils
 from _pydev_bundle import pydev_log
 from _pydevd_bundle.pydevd_breakpoints import LineBreakpoint
 from pydevd_tracing import get_exception_traceback_str
+import os
+import subprocess
+import ctypes
 
 try:
     import dis
@@ -61,6 +64,9 @@ class PyDevdAPI(object):
 
     def run(self, py_db):
         py_db.ready_to_run = True
+
+    def notify_initialize(self, py_db):
+        py_db.on_initialize()
 
     def notify_configuration_done(self, py_db):
         py_db.on_configuration_done()
@@ -159,6 +165,7 @@ class PyDevdAPI(object):
         self.remove_all_breakpoints(py_db, filename='*')
         self.remove_all_exception_breakpoints(py_db)
         self.notify_disconnect(py_db)
+
         if resume_threads:
             self.request_resume_thread(thread_id='*')
 
@@ -799,3 +806,182 @@ class PyDevdAPI(object):
 
         self.reapply_breakpoints(py_db)
         return ''
+
+    def get_ppid(self):
+        '''
+        Provides the parent pid (even for older versions of Python on Windows).
+        '''
+        ppid = None
+
+        try:
+            ppid = os.getppid()
+        except AttributeError:
+            pass
+
+        if ppid is None and IS_WINDOWS:
+            ppid = self._get_windows_ppid()
+
+        return ppid
+
+    def _get_windows_ppid(self):
+        this_pid = os.getpid()
+        for ppid, pid in _list_ppid_and_pid():
+            if pid == this_pid:
+                return ppid
+
+        return None
+
+    def _terminate_child_processes_windows(self, dont_terminate_child_pids):
+        this_pid = os.getpid()
+        for _ in range(50):  # Try this at most 50 times before giving up.
+
+            # Note: we can't kill the process itself with taskkill, so, we
+            # list immediate children, kill that tree and then exit this process.
+
+            children_pids = []
+            for ppid, pid in _list_ppid_and_pid():
+                if ppid == this_pid:
+                    if pid not in dont_terminate_child_pids:
+                        children_pids.append(pid)
+
+            if not children_pids:
+                break
+            else:
+                for pid in children_pids:
+                    self._call(
+                        ['taskkill', '/F', '/PID', str(pid), '/T'],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+
+                del children_pids[:]
+
+    def _terminate_child_processes_linux_and_mac(self, dont_terminate_child_pids):
+        this_pid = os.getpid()
+
+        def list_children_and_stop_forking(initial_pid, stop=True):
+            children_pids = []
+            if stop:
+                # Ask to stop forking (shouldn't be called for this process, only subprocesses).
+                self._call(
+                    ['kill', '-STOP', str(initial_pid)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+
+            list_popen = self._popen(
+                ['pgrep', '-P', str(initial_pid)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            if list_popen is not None:
+                stdout, _ = list_popen.communicate()
+                for line in stdout.splitlines():
+                    line = line.decode('ascii').strip()
+                    if line:
+                        pid = str(line)
+                        if pid in dont_terminate_child_pids:
+                            continue
+                        children_pids.append(pid)
+                        # Recursively get children.
+                        children_pids.extend(list_children_and_stop_forking(pid))
+            return children_pids
+
+        previously_found = set()
+
+        for _ in range(50):  # Try this at most 50 times before giving up.
+
+            children_pids = list_children_and_stop_forking(this_pid, stop=False)
+            found_new = False
+
+            for pid in children_pids:
+                if pid not in previously_found:
+                    found_new = True
+                    previously_found.add(pid)
+                    self._call(
+                        ['kill', '-KILL', str(pid)],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+
+            if not found_new:
+                break
+
+    def _popen(self, cmdline, **kwargs):
+        try:
+            return subprocess.Popen(cmdline, **kwargs)
+        except:
+            if DebugInfoHolder.DEBUG_TRACE_LEVEL >= 1:
+                pydev_log.exception('Error running: %s' % (' '.join(cmdline)))
+            return None
+
+    def _call(self, cmdline, **kwargs):
+        try:
+            subprocess.check_call(cmdline, **kwargs)
+        except:
+            if DebugInfoHolder.DEBUG_TRACE_LEVEL >= 1:
+                pydev_log.exception('Error running: %s' % (' '.join(cmdline)))
+
+    def set_terminate_child_processes(self, py_db, terminate_child_processes):
+        py_db.terminate_child_processes = terminate_child_processes
+
+    def terminate_process(self, py_db):
+        '''
+        Terminates the current process (and child processes if the option to also terminate
+        child processes is enabled).
+        '''
+        try:
+            if py_db.terminate_child_processes:
+                pydev_log.debug('Terminating child processes.')
+                if IS_WINDOWS:
+                    self._terminate_child_processes_windows(py_db.dont_terminate_child_pids)
+                else:
+                    self._terminate_child_processes_linux_and_mac(py_db.dont_terminate_child_pids)
+        finally:
+            pydev_log.debug('Exiting process (os._exit(0)).')
+            os._exit(0)
+
+    def _terminate_if_commands_processed(self, py_db):
+        py_db.dispose_and_kill_all_pydevd_threads()
+        self.terminate_process(py_db)
+
+    def request_terminate_process(self, py_db):
+        # We mark with a terminate_requested to avoid that paused threads start running
+        # (we should terminate as is without letting any paused thread run).
+        py_db.terminate_requested = True
+        run_as_pydevd_daemon_thread(py_db, self._terminate_if_commands_processed, py_db)
+
+
+def _list_ppid_and_pid():
+    _TH32CS_SNAPPROCESS = 0x00000002
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [("dwSize", ctypes.c_uint32),
+                    ("cntUsage", ctypes.c_uint32),
+                    ("th32ProcessID", ctypes.c_uint32),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", ctypes.c_uint32),
+                    ("cntThreads", ctypes.c_uint32),
+                    ("th32ParentProcessID", ctypes.c_uint32),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", ctypes.c_uint32),
+                    ("szExeFile", ctypes.c_char * 260)]
+
+    kernel32 = ctypes.windll.kernel32
+    snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    ppid_and_pids = []
+    try:
+        process_entry = PROCESSENTRY32()
+        process_entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        if not kernel32.Process32First(snapshot, ctypes.byref(process_entry)):
+            pydev_log.critical('Process32First failed (getting process from CreateToolhelp32Snapshot).')
+        else:
+            while True:
+                ppid_and_pids.append((process_entry.th32ParentProcessID, process_entry.th32ProcessID))
+                if not kernel32.Process32Next(snapshot, ctypes.byref(process_entry)):
+                    break
+    finally:
+        kernel32.CloseHandle(snapshot)
+        
+    return ppid_and_pids

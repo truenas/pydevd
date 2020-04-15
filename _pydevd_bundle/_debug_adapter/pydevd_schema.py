@@ -952,8 +952,8 @@ class OutputEvent(BaseSchema):
                     "description": "The output to report."
                 },
                 "variablesReference": {
-                    "type": "number",
-                    "description": "If an attribute 'variablesReference' exists and its value is > 0, the output contains objects which can be retrieved by passing 'variablesReference' to the 'variables' request."
+                    "type": "integer",
+                    "description": "If an attribute 'variablesReference' exists and its value is > 0, the output contains objects which can be retrieved by passing 'variablesReference' to the 'variables' request. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "source": {
                     "$ref": "#/definitions/Source",
@@ -1658,12 +1658,12 @@ class RunInTerminalResponse(BaseSchema):
             "type": "object",
             "properties": {
                 "processId": {
-                    "type": "number",
-                    "description": "The process ID."
+                    "type": "integer",
+                    "description": "The process ID. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "shellProcessId": {
-                    "type": "number",
-                    "description": "The process ID of the terminal shell."
+                    "type": "integer",
+                    "description": "The process ID of the terminal shell. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 }
             }
         }
@@ -6166,7 +6166,7 @@ class GotoResponse(BaseSchema):
 @register
 class PauseRequest(BaseSchema):
     """
-    The request suspenses the debuggee.
+    The request suspends the debuggee.
     
     The debug adapter first sends the response and then a 'stopped' event (with reason 'pause') after
     the thread has been paused successfully.
@@ -6938,7 +6938,7 @@ class VariablesArguments(BaseSchema):
                 "indexed",
                 "named"
             ],
-            "description": "Optional filter to limit the child variables to either named or indexed. If ommited, both types are fetched."
+            "description": "Optional filter to limit the child variables to either named or indexed. If omitted, both types are fetched."
         },
         "start": {
             "type": "integer",
@@ -6960,7 +6960,7 @@ class VariablesArguments(BaseSchema):
     def __init__(self, variablesReference, filter=None, start=None, count=None, format=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
         """
         :param integer variablesReference: The Variable reference.
-        :param string filter: Optional filter to limit the child variables to either named or indexed. If ommited, both types are fetched.
+        :param string filter: Optional filter to limit the child variables to either named or indexed. If omitted, both types are fetched.
         :param integer start: The index of the first variable to return; if omitted children start at 0.
         :param integer count: The number of variables to return. If count is missing or 0, all variables are returned.
         :param ValueFormat format: Specifies details on how to format the Variable values.
@@ -7309,16 +7309,16 @@ class SetVariableResponse(BaseSchema):
                     "description": "The type of the new value. Typically shown in the UI when hovering over the value."
                 },
                 "variablesReference": {
-                    "type": "number",
-                    "description": "If variablesReference is > 0, the new value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest."
+                    "type": "integer",
+                    "description": "If variablesReference is > 0, the new value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "namedVariables": {
-                    "type": "number",
-                    "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+                    "type": "integer",
+                    "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "indexedVariables": {
-                    "type": "number",
-                    "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+                    "type": "integer",
+                    "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 }
             },
             "required": [
@@ -8593,16 +8593,16 @@ class EvaluateResponse(BaseSchema):
                     "description": "Properties of a evaluate result that can be used to determine how to render the result in the UI."
                 },
                 "variablesReference": {
-                    "type": "number",
-                    "description": "If variablesReference is > 0, the evaluate result is structured and its children can be retrieved by passing variablesReference to the VariablesRequest."
+                    "type": "integer",
+                    "description": "If variablesReference is > 0, the evaluate result is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "namedVariables": {
-                    "type": "number",
-                    "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+                    "type": "integer",
+                    "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "indexedVariables": {
-                    "type": "number",
-                    "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+                    "type": "integer",
+                    "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "memoryReference": {
                     "type": "string",
@@ -8866,16 +8866,16 @@ class SetExpressionResponse(BaseSchema):
                     "description": "Properties of a value that can be used to determine how to render the result in the UI."
                 },
                 "variablesReference": {
-                    "type": "number",
-                    "description": "If variablesReference is > 0, the value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest."
+                    "type": "integer",
+                    "description": "If variablesReference is > 0, the value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "namedVariables": {
-                    "type": "number",
-                    "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+                    "type": "integer",
+                    "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 },
                 "indexedVariables": {
-                    "type": "number",
-                    "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+                    "type": "integer",
+                    "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
                 }
             },
             "required": [
@@ -10383,6 +10383,13 @@ class Capabilities(BaseSchema):
             "type": "boolean",
             "description": "The debug adapter supports the 'completions' request."
         },
+        "completionTriggerCharacters": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "The set of characters that should trigger completion in a REPL. If not specified, the UI should assume the '.' character."
+        },
         "supportsModulesRequest": {
             "type": "boolean",
             "description": "The debug adapter supports the 'modules' request."
@@ -10462,7 +10469,7 @@ class Capabilities(BaseSchema):
 
     __slots__ = list(__props__.keys()) + ['kwargs']
 
-    def __init__(self, supportsConfigurationDoneRequest=None, supportsFunctionBreakpoints=None, supportsConditionalBreakpoints=None, supportsHitConditionalBreakpoints=None, supportsEvaluateForHovers=None, exceptionBreakpointFilters=None, supportsStepBack=None, supportsSetVariable=None, supportsRestartFrame=None, supportsGotoTargetsRequest=None, supportsStepInTargetsRequest=None, supportsCompletionsRequest=None, supportsModulesRequest=None, additionalModuleColumns=None, supportedChecksumAlgorithms=None, supportsRestartRequest=None, supportsExceptionOptions=None, supportsValueFormattingOptions=None, supportsExceptionInfoRequest=None, supportTerminateDebuggee=None, supportsDelayedStackTraceLoading=None, supportsLoadedSourcesRequest=None, supportsLogPoints=None, supportsTerminateThreadsRequest=None, supportsSetExpression=None, supportsTerminateRequest=None, supportsDataBreakpoints=None, supportsReadMemoryRequest=None, supportsDisassembleRequest=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+    def __init__(self, supportsConfigurationDoneRequest=None, supportsFunctionBreakpoints=None, supportsConditionalBreakpoints=None, supportsHitConditionalBreakpoints=None, supportsEvaluateForHovers=None, exceptionBreakpointFilters=None, supportsStepBack=None, supportsSetVariable=None, supportsRestartFrame=None, supportsGotoTargetsRequest=None, supportsStepInTargetsRequest=None, supportsCompletionsRequest=None, completionTriggerCharacters=None, supportsModulesRequest=None, additionalModuleColumns=None, supportedChecksumAlgorithms=None, supportsRestartRequest=None, supportsExceptionOptions=None, supportsValueFormattingOptions=None, supportsExceptionInfoRequest=None, supportTerminateDebuggee=None, supportsDelayedStackTraceLoading=None, supportsLoadedSourcesRequest=None, supportsLogPoints=None, supportsTerminateThreadsRequest=None, supportsSetExpression=None, supportsTerminateRequest=None, supportsDataBreakpoints=None, supportsReadMemoryRequest=None, supportsDisassembleRequest=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
         """
         :param boolean supportsConfigurationDoneRequest: The debug adapter supports the 'configurationDone' request.
         :param boolean supportsFunctionBreakpoints: The debug adapter supports function breakpoints.
@@ -10476,6 +10483,7 @@ class Capabilities(BaseSchema):
         :param boolean supportsGotoTargetsRequest: The debug adapter supports the 'gotoTargets' request.
         :param boolean supportsStepInTargetsRequest: The debug adapter supports the 'stepInTargets' request.
         :param boolean supportsCompletionsRequest: The debug adapter supports the 'completions' request.
+        :param array completionTriggerCharacters: The set of characters that should trigger completion in a REPL. If not specified, the UI should assume the '.' character.
         :param boolean supportsModulesRequest: The debug adapter supports the 'modules' request.
         :param array additionalModuleColumns: The set of additional module information exposed by the debug adapter.
         :param array supportedChecksumAlgorithms: Checksum algorithms supported by the debug adapter.
@@ -10509,6 +10517,7 @@ class Capabilities(BaseSchema):
         self.supportsGotoTargetsRequest = supportsGotoTargetsRequest
         self.supportsStepInTargetsRequest = supportsStepInTargetsRequest
         self.supportsCompletionsRequest = supportsCompletionsRequest
+        self.completionTriggerCharacters = completionTriggerCharacters
         self.supportsModulesRequest = supportsModulesRequest
         self.additionalModuleColumns = additionalModuleColumns
         if update_ids_from_dap and self.additionalModuleColumns:
@@ -10550,6 +10559,9 @@ class Capabilities(BaseSchema):
         supportsGotoTargetsRequest = self.supportsGotoTargetsRequest
         supportsStepInTargetsRequest = self.supportsStepInTargetsRequest
         supportsCompletionsRequest = self.supportsCompletionsRequest
+        completionTriggerCharacters = self.completionTriggerCharacters
+        if completionTriggerCharacters and hasattr(completionTriggerCharacters[0], "to_dict"):
+            completionTriggerCharacters = [x.to_dict() for x in completionTriggerCharacters]
         supportsModulesRequest = self.supportsModulesRequest
         additionalModuleColumns = self.additionalModuleColumns
         if additionalModuleColumns and hasattr(additionalModuleColumns[0], "to_dict"):
@@ -10597,6 +10609,8 @@ class Capabilities(BaseSchema):
             dct['supportsStepInTargetsRequest'] = supportsStepInTargetsRequest
         if supportsCompletionsRequest is not None:
             dct['supportsCompletionsRequest'] = supportsCompletionsRequest
+        if completionTriggerCharacters is not None:
+            dct['completionTriggerCharacters'] = completionTriggerCharacters
         if supportsModulesRequest is not None:
             dct['supportsModulesRequest'] = supportsModulesRequest
         if additionalModuleColumns is not None:
@@ -11124,8 +11138,8 @@ class Source(BaseSchema):
             "description": "The path of the source to be shown in the UI. It is only used to locate and load the content of the source if no sourceReference is specified (or its value is 0)."
         },
         "sourceReference": {
-            "type": "number",
-            "description": "If sourceReference > 0 the contents of the source must be retrieved through the SourceRequest (even if a path is specified). A sourceReference is only valid for a session, so it must not be used to persist a source."
+            "type": "integer",
+            "description": "If sourceReference > 0 the contents of the source must be retrieved through the SourceRequest (even if a path is specified). A sourceReference is only valid for a session, so it must not be used to persist a source. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "presentationHint": {
             "type": "string",
@@ -11175,7 +11189,7 @@ class Source(BaseSchema):
         """
         :param string name: The short name of the source. Every source returned from the debug adapter has a name. When sending a source to the debug adapter this name is optional.
         :param string path: The path of the source to be shown in the UI. It is only used to locate and load the content of the source if no sourceReference is specified (or its value is 0).
-        :param number sourceReference: If sourceReference > 0 the contents of the source must be retrieved through the SourceRequest (even if a path is specified). A sourceReference is only valid for a session, so it must not be used to persist a source.
+        :param integer sourceReference: If sourceReference > 0 the contents of the source must be retrieved through the SourceRequest (even if a path is specified). A sourceReference is only valid for a session, so it must not be used to persist a source. The value should be less than or equal to 2147483647 (2^31 - 1).
         :param string presentationHint: An optional hint for how to present the source in the UI. A value of 'deemphasize' can be used to indicate that the source is not available or that it is skipped on stepping.
         :param string origin: The (optional) origin of this source: possible values 'internal module', 'inlined content from source map', etc.
         :param array sources: An optional list of sources that are related to this source. These may be the source that generated this source.
@@ -12256,6 +12270,10 @@ class CompletionItem(BaseSchema):
             "type": "string",
             "description": "If text is not falsy then it is inserted instead of the label."
         },
+        "sortText": {
+            "type": "string",
+            "description": "A string that should be used when comparing this item with other items. When `falsy` the label is used."
+        },
         "type": {
             "description": "The item's type. Typically the client uses this information to render the item in the UI with an icon.",
             "type": "CompletionItemType"
@@ -12273,10 +12291,11 @@ class CompletionItem(BaseSchema):
 
     __slots__ = list(__props__.keys()) + ['kwargs']
 
-    def __init__(self, label, text=None, type=None, start=None, length=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+    def __init__(self, label, text=None, sortText=None, type=None, start=None, length=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
         """
         :param string label: The label of this completion item. By default this is also the text that is inserted when selecting this completion.
         :param string text: If text is not falsy then it is inserted instead of the label.
+        :param string sortText: A string that should be used when comparing this item with other items. When `falsy` the label is used.
         :param CompletionItemType type: The item's type. Typically the client uses this information to render the item in the UI with an icon.
         :param integer start: This value determines the location (in the CompletionsRequest's 'text' attribute) where the completion text is added.
         If missing the text is added at the location specified by the CompletionsRequest's 'column' attribute.
@@ -12285,6 +12304,7 @@ class CompletionItem(BaseSchema):
         """
         self.label = label
         self.text = text
+        self.sortText = sortText
         assert type in CompletionItemType.VALID_VALUES
         self.type = type
         self.start = start
@@ -12295,6 +12315,7 @@ class CompletionItem(BaseSchema):
     def to_dict(self, update_ids_to_dap=False):  # noqa (update_ids_to_dap may be unused)
         label = self.label
         text = self.text
+        sortText = self.sortText
         type = self.type  # noqa (assign to builtin)
         start = self.start
         length = self.length
@@ -12303,6 +12324,8 @@ class CompletionItem(BaseSchema):
         }
         if text is not None:
             dct['text'] = text
+        if sortText is not None:
+            dct['sortText'] = sortText
         if type is not None:
             dct['type'] = type
         if start is not None:
@@ -12640,7 +12663,7 @@ class ExceptionBreakMode(BaseSchema):
     
     always: always breaks,
     
-    unhandled: breaks when excpetion unhandled,
+    unhandled: breaks when exception unhandled,
     
     userUnhandled: breaks if the exception is not handled by user code.
 
@@ -12837,7 +12860,7 @@ class DisassembledInstruction(BaseSchema):
         },
         "symbol": {
             "type": "string",
-            "description": "Name of the symbol that correponds with the location of this instruction, if any."
+            "description": "Name of the symbol that corresponds with the location of this instruction, if any."
         },
         "location": {
             "description": "Source location that corresponds to this instruction, if any. Should always be set (if available) on the first instruction returned, but can be omitted afterwards if this instruction maps to the same source file as the previous instruction.",
@@ -12869,7 +12892,7 @@ class DisassembledInstruction(BaseSchema):
         :param string address: The address of the instruction. Treated as a hex value if prefixed with '0x', or as a decimal value otherwise.
         :param string instruction: Text representing the instruction and its operands, in an implementation-defined format.
         :param string instructionBytes: Optional raw bytes representing the instruction and its operands, in an implementation-defined format.
-        :param string symbol: Name of the symbol that correponds with the location of this instruction, if any.
+        :param string symbol: Name of the symbol that corresponds with the location of this instruction, if any.
         :param Source location: Source location that corresponds to this instruction, if any. Should always be set (if available) on the first instruction returned, but can be omitted afterwards if this instruction maps to the same source file as the previous instruction.
         :param integer line: The line within the source location that corresponds to this instruction, if any.
         :param integer column: The column within the line that corresponds to this instruction, if any.
@@ -13173,6 +13196,79 @@ class SetDebuggerPropertyResponse(BaseSchema):
         }
         if message is not None:
             dct['message'] = message
+        if body is not None:
+            dct['body'] = body
+        dct.update(self.kwargs)
+        return dct
+
+
+@register_event('pydevdInputRequested')
+@register
+class PydevdInputRequestedEvent(BaseSchema):
+    """
+    The event indicates input was requested by debuggee.
+
+    Note: automatically generated code. Do not edit manually.
+    """
+
+    __props__ = {
+        "seq": {
+            "type": "integer",
+            "description": "Sequence number."
+        },
+        "type": {
+            "type": "string",
+            "enum": [
+                "event"
+            ]
+        },
+        "event": {
+            "type": "string",
+            "enum": [
+                "pydevdInputRequested"
+            ]
+        },
+        "body": {
+            "type": [
+                "array",
+                "boolean",
+                "integer",
+                "null",
+                "number",
+                "object",
+                "string"
+            ],
+            "description": "Event-specific information."
+        }
+    }
+    __refs__ = set()
+
+    __slots__ = list(__props__.keys()) + ['kwargs']
+
+    def __init__(self, seq=-1, body=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+        """
+        :param string type: 
+        :param string event: 
+        :param integer seq: Sequence number.
+        :param ['array', 'boolean', 'integer', 'null', 'number', 'object', 'string'] body: Event-specific information.
+        """
+        self.type = 'event'
+        self.event = 'pydevdInputRequested'
+        self.seq = seq
+        self.body = body
+        self.kwargs = kwargs
+
+
+    def to_dict(self, update_ids_to_dap=False):  # noqa (update_ids_to_dap may be unused)
+        type = self.type  # noqa (assign to builtin)
+        event = self.event
+        seq = self.seq
+        body = self.body
+        dct = {
+            'type': type,
+            'event': event,
+            'seq': seq,
+        }
         if body is not None:
             dct['body'] = body
         dct.update(self.kwargs)
@@ -13616,12 +13712,17 @@ class PydevdSystemInfoResponse(BaseSchema):
                 "process": {
                     "$ref": "#/definitions/PydevdProcessInfo",
                     "description": "Information about the current process."
+                },
+                "pydevd": {
+                    "$ref": "#/definitions/PydevdInfo",
+                    "description": "Information about pydevd."
                 }
             },
             "required": [
                 "python",
                 "platform",
-                "process"
+                "process",
+                "pydevd"
             ]
         }
     }
@@ -13825,6 +13926,10 @@ class PydevdProcessInfo(BaseSchema):
             "type": "integer",
             "description": "Process ID for the current process."
         },
+        "ppid": {
+            "type": "integer",
+            "description": "Parent Process ID for the current process."
+        },
         "executable": {
             "type": "string",
             "description": "Path to the executable as returned by 'sys.executable'."
@@ -13838,13 +13943,15 @@ class PydevdProcessInfo(BaseSchema):
 
     __slots__ = list(__props__.keys()) + ['kwargs']
 
-    def __init__(self, pid=None, executable=None, bitness=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+    def __init__(self, pid=None, ppid=None, executable=None, bitness=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
         """
         :param integer pid: Process ID for the current process.
+        :param integer ppid: Parent Process ID for the current process.
         :param string executable: Path to the executable as returned by 'sys.executable'.
         :param integer bitness: Integer value indicating the bitness of the current process.
         """
         self.pid = pid
+        self.ppid = ppid
         self.executable = executable
         self.bitness = bitness
         self.kwargs = kwargs
@@ -13852,16 +13959,264 @@ class PydevdProcessInfo(BaseSchema):
 
     def to_dict(self, update_ids_to_dap=False):  # noqa (update_ids_to_dap may be unused)
         pid = self.pid
+        ppid = self.ppid
         executable = self.executable
         bitness = self.bitness
         dct = {
         }
         if pid is not None:
             dct['pid'] = pid
+        if ppid is not None:
+            dct['ppid'] = ppid
         if executable is not None:
             dct['executable'] = executable
         if bitness is not None:
             dct['bitness'] = bitness
+        dct.update(self.kwargs)
+        return dct
+
+
+@register
+class PydevdInfo(BaseSchema):
+    """
+    This object contains details on pydevd.
+
+    Note: automatically generated code. Do not edit manually.
+    """
+
+    __props__ = {
+        "usingCython": {
+            "type": "boolean",
+            "description": "Specifies whether the cython native module is being used."
+        },
+        "usingFrameEval": {
+            "type": "boolean",
+            "description": "Specifies whether the frame eval native module is being used."
+        }
+    }
+    __refs__ = set()
+
+    __slots__ = list(__props__.keys()) + ['kwargs']
+
+    def __init__(self, usingCython=None, usingFrameEval=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+        """
+        :param boolean usingCython: Specifies whether the cython native module is being used.
+        :param boolean usingFrameEval: Specifies whether the frame eval native module is being used.
+        """
+        self.usingCython = usingCython
+        self.usingFrameEval = usingFrameEval
+        self.kwargs = kwargs
+
+
+    def to_dict(self, update_ids_to_dap=False):  # noqa (update_ids_to_dap may be unused)
+        usingCython = self.usingCython
+        usingFrameEval = self.usingFrameEval
+        dct = {
+        }
+        if usingCython is not None:
+            dct['usingCython'] = usingCython
+        if usingFrameEval is not None:
+            dct['usingFrameEval'] = usingFrameEval
+        dct.update(self.kwargs)
+        return dct
+
+
+@register_request('pydevdAuthorize')
+@register
+class PydevdAuthorizeRequest(BaseSchema):
+    """
+    A request to authorize the ide to start accepting commands.
+
+    Note: automatically generated code. Do not edit manually.
+    """
+
+    __props__ = {
+        "seq": {
+            "type": "integer",
+            "description": "Sequence number."
+        },
+        "type": {
+            "type": "string",
+            "enum": [
+                "request"
+            ]
+        },
+        "command": {
+            "type": "string",
+            "enum": [
+                "pydevdAuthorize"
+            ]
+        },
+        "arguments": {
+            "type": "PydevdAuthorizeArguments"
+        }
+    }
+    __refs__ = set(['arguments'])
+
+    __slots__ = list(__props__.keys()) + ['kwargs']
+
+    def __init__(self, arguments, seq=-1, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+        """
+        :param string type: 
+        :param string command: 
+        :param PydevdAuthorizeArguments arguments: 
+        :param integer seq: Sequence number.
+        """
+        self.type = 'request'
+        self.command = 'pydevdAuthorize'
+        if arguments is None:
+            self.arguments = PydevdAuthorizeArguments()
+        else:
+            self.arguments = PydevdAuthorizeArguments(update_ids_from_dap=update_ids_from_dap, **arguments) if arguments.__class__ !=  PydevdAuthorizeArguments else arguments
+        self.seq = seq
+        self.kwargs = kwargs
+
+
+    def to_dict(self, update_ids_to_dap=False):  # noqa (update_ids_to_dap may be unused)
+        type = self.type  # noqa (assign to builtin)
+        command = self.command
+        arguments = self.arguments
+        seq = self.seq
+        dct = {
+            'type': type,
+            'command': command,
+            'arguments': arguments.to_dict(update_ids_to_dap=update_ids_to_dap),
+            'seq': seq,
+        }
+        dct.update(self.kwargs)
+        return dct
+
+
+@register
+class PydevdAuthorizeArguments(BaseSchema):
+    """
+    Arguments for 'pydevdAuthorize' request.
+
+    Note: automatically generated code. Do not edit manually.
+    """
+
+    __props__ = {
+        "debugServerAccessToken": {
+            "type": "string",
+            "description": "The access token to access the debug server."
+        }
+    }
+    __refs__ = set()
+
+    __slots__ = list(__props__.keys()) + ['kwargs']
+
+    def __init__(self, debugServerAccessToken=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+        """
+        :param string debugServerAccessToken: The access token to access the debug server.
+        """
+        self.debugServerAccessToken = debugServerAccessToken
+        self.kwargs = kwargs
+
+
+    def to_dict(self, update_ids_to_dap=False):  # noqa (update_ids_to_dap may be unused)
+        debugServerAccessToken = self.debugServerAccessToken
+        dct = {
+        }
+        if debugServerAccessToken is not None:
+            dct['debugServerAccessToken'] = debugServerAccessToken
+        dct.update(self.kwargs)
+        return dct
+
+
+@register_response('pydevdAuthorize')
+@register
+class PydevdAuthorizeResponse(BaseSchema):
+    """
+    Response to 'pydevdAuthorize' request.
+
+    Note: automatically generated code. Do not edit manually.
+    """
+
+    __props__ = {
+        "seq": {
+            "type": "integer",
+            "description": "Sequence number."
+        },
+        "type": {
+            "type": "string",
+            "enum": [
+                "response"
+            ]
+        },
+        "request_seq": {
+            "type": "integer",
+            "description": "Sequence number of the corresponding request."
+        },
+        "success": {
+            "type": "boolean",
+            "description": "Outcome of the request."
+        },
+        "command": {
+            "type": "string",
+            "description": "The command requested."
+        },
+        "message": {
+            "type": "string",
+            "description": "Contains error message if success == false."
+        },
+        "body": {
+            "type": "object",
+            "properties": {
+                "clientAccessToken": {
+                    "type": "string",
+                    "description": "The access token to access the client (i.e.: usually the IDE)."
+                }
+            },
+            "required": [
+                "clientAccessToken"
+            ]
+        }
+    }
+    __refs__ = set(['body'])
+
+    __slots__ = list(__props__.keys()) + ['kwargs']
+
+    def __init__(self, request_seq, success, command, body, seq=-1, message=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+        """
+        :param string type: 
+        :param integer request_seq: Sequence number of the corresponding request.
+        :param boolean success: Outcome of the request.
+        :param string command: The command requested.
+        :param PydevdAuthorizeResponseBody body: 
+        :param integer seq: Sequence number.
+        :param string message: Contains error message if success == false.
+        """
+        self.type = 'response'
+        self.request_seq = request_seq
+        self.success = success
+        self.command = command
+        if body is None:
+            self.body = PydevdAuthorizeResponseBody()
+        else:
+            self.body = PydevdAuthorizeResponseBody(update_ids_from_dap=update_ids_from_dap, **body) if body.__class__ !=  PydevdAuthorizeResponseBody else body
+        self.seq = seq
+        self.message = message
+        self.kwargs = kwargs
+
+
+    def to_dict(self, update_ids_to_dap=False):  # noqa (update_ids_to_dap may be unused)
+        type = self.type  # noqa (assign to builtin)
+        request_seq = self.request_seq
+        success = self.success
+        command = self.command
+        body = self.body
+        seq = self.seq
+        message = self.message
+        dct = {
+            'type': type,
+            'request_seq': request_seq,
+            'success': success,
+            'command': command,
+            'body': body.to_dict(update_ids_to_dap=update_ids_to_dap),
+            'seq': seq,
+        }
+        if message is not None:
+            dct['message'] = message
         dct.update(self.kwargs)
         return dct
 
@@ -14244,8 +14599,8 @@ class OutputEventBody(BaseSchema):
             "description": "The output to report."
         },
         "variablesReference": {
-            "type": "number",
-            "description": "If an attribute 'variablesReference' exists and its value is > 0, the output contains objects which can be retrieved by passing 'variablesReference' to the 'variables' request."
+            "type": "integer",
+            "description": "If an attribute 'variablesReference' exists and its value is > 0, the output contains objects which can be retrieved by passing 'variablesReference' to the 'variables' request. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "source": {
             "description": "An optional source location where the output was produced.",
@@ -14280,7 +14635,7 @@ class OutputEventBody(BaseSchema):
         """
         :param string output: The output to report.
         :param string category: The output category. If not specified, 'console' is assumed.
-        :param number variablesReference: If an attribute 'variablesReference' exists and its value is > 0, the output contains objects which can be retrieved by passing 'variablesReference' to the 'variables' request.
+        :param integer variablesReference: If an attribute 'variablesReference' exists and its value is > 0, the output contains objects which can be retrieved by passing 'variablesReference' to the 'variables' request. The value should be less than or equal to 2147483647 (2^31 - 1).
         :param Source source: An optional source location where the output was produced.
         :param integer line: An optional source location line where the output was produced.
         :param integer column: An optional source location column where the output was produced.
@@ -14653,12 +15008,12 @@ class RunInTerminalResponseBody(BaseSchema):
 
     __props__ = {
         "processId": {
-            "type": "number",
-            "description": "The process ID."
+            "type": "integer",
+            "description": "The process ID. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "shellProcessId": {
-            "type": "number",
-            "description": "The process ID of the terminal shell."
+            "type": "integer",
+            "description": "The process ID of the terminal shell. The value should be less than or equal to 2147483647 (2^31 - 1)."
         }
     }
     __refs__ = set()
@@ -14667,8 +15022,8 @@ class RunInTerminalResponseBody(BaseSchema):
 
     def __init__(self, processId=None, shellProcessId=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
         """
-        :param number processId: The process ID.
-        :param number shellProcessId: The process ID of the terminal shell.
+        :param integer processId: The process ID. The value should be less than or equal to 2147483647 (2^31 - 1).
+        :param integer shellProcessId: The process ID of the terminal shell. The value should be less than or equal to 2147483647 (2^31 - 1).
         """
         self.processId = processId
         self.shellProcessId = shellProcessId
@@ -15082,16 +15437,16 @@ class SetVariableResponseBody(BaseSchema):
             "description": "The type of the new value. Typically shown in the UI when hovering over the value."
         },
         "variablesReference": {
-            "type": "number",
-            "description": "If variablesReference is > 0, the new value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest."
+            "type": "integer",
+            "description": "If variablesReference is > 0, the new value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "namedVariables": {
-            "type": "number",
-            "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+            "type": "integer",
+            "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "indexedVariables": {
-            "type": "number",
-            "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+            "type": "integer",
+            "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
         }
     }
     __refs__ = set()
@@ -15102,11 +15457,11 @@ class SetVariableResponseBody(BaseSchema):
         """
         :param string value: The new value of the variable.
         :param string type: The type of the new value. Typically shown in the UI when hovering over the value.
-        :param number variablesReference: If variablesReference is > 0, the new value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest.
-        :param number namedVariables: The number of named child variables.
-        The client can use this optional information to present the variables in a paged UI and fetch them in chunks.
-        :param number indexedVariables: The number of indexed child variables.
-        The client can use this optional information to present the variables in a paged UI and fetch them in chunks.
+        :param integer variablesReference: If variablesReference is > 0, the new value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1).
+        :param integer namedVariables: The number of named child variables.
+        The client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1).
+        :param integer indexedVariables: The number of indexed child variables.
+        The client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1).
         """
         self.value = value
         self.type = type
@@ -15358,16 +15713,16 @@ class EvaluateResponseBody(BaseSchema):
             "type": "VariablePresentationHint"
         },
         "variablesReference": {
-            "type": "number",
-            "description": "If variablesReference is > 0, the evaluate result is structured and its children can be retrieved by passing variablesReference to the VariablesRequest."
+            "type": "integer",
+            "description": "If variablesReference is > 0, the evaluate result is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "namedVariables": {
-            "type": "number",
-            "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+            "type": "integer",
+            "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "indexedVariables": {
-            "type": "number",
-            "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+            "type": "integer",
+            "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "memoryReference": {
             "type": "string",
@@ -15381,13 +15736,13 @@ class EvaluateResponseBody(BaseSchema):
     def __init__(self, result, variablesReference, type=None, presentationHint=None, namedVariables=None, indexedVariables=None, memoryReference=None, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
         """
         :param string result: The result of the evaluate request.
-        :param number variablesReference: If variablesReference is > 0, the evaluate result is structured and its children can be retrieved by passing variablesReference to the VariablesRequest.
+        :param integer variablesReference: If variablesReference is > 0, the evaluate result is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1).
         :param string type: The optional type of the evaluate result.
         :param VariablePresentationHint presentationHint: Properties of a evaluate result that can be used to determine how to render the result in the UI.
-        :param number namedVariables: The number of named child variables.
-        The client can use this optional information to present the variables in a paged UI and fetch them in chunks.
-        :param number indexedVariables: The number of indexed child variables.
-        The client can use this optional information to present the variables in a paged UI and fetch them in chunks.
+        :param integer namedVariables: The number of named child variables.
+        The client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1).
+        :param integer indexedVariables: The number of indexed child variables.
+        The client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1).
         :param string memoryReference: Memory reference to a location appropriate for this result. For pointer type eval results, this is generally a reference to the memory address contained in the pointer.
         """
         self.result = result
@@ -15468,16 +15823,16 @@ class SetExpressionResponseBody(BaseSchema):
             "type": "VariablePresentationHint"
         },
         "variablesReference": {
-            "type": "number",
-            "description": "If variablesReference is > 0, the value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest."
+            "type": "integer",
+            "description": "If variablesReference is > 0, the value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "namedVariables": {
-            "type": "number",
-            "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+            "type": "integer",
+            "description": "The number of named child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
         },
         "indexedVariables": {
-            "type": "number",
-            "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks."
+            "type": "integer",
+            "description": "The number of indexed child variables.\nThe client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1)."
         }
     }
     __refs__ = set(['presentationHint'])
@@ -15489,11 +15844,11 @@ class SetExpressionResponseBody(BaseSchema):
         :param string value: The new value of the expression.
         :param string type: The optional type of the value.
         :param VariablePresentationHint presentationHint: Properties of a value that can be used to determine how to render the result in the UI.
-        :param number variablesReference: If variablesReference is > 0, the value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest.
-        :param number namedVariables: The number of named child variables.
-        The client can use this optional information to present the variables in a paged UI and fetch them in chunks.
-        :param number indexedVariables: The number of indexed child variables.
-        The client can use this optional information to present the variables in a paged UI and fetch them in chunks.
+        :param integer variablesReference: If variablesReference is > 0, the value is structured and its children can be retrieved by passing variablesReference to the VariablesRequest. The value should be less than or equal to 2147483647 (2^31 - 1).
+        :param integer namedVariables: The number of named child variables.
+        The client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1).
+        :param integer indexedVariables: The number of indexed child variables.
+        The client can use this optional information to present the variables in a paged UI and fetch them in chunks. The value should be less than or equal to 2147483647 (2^31 - 1).
         """
         self.value = value
         self.type = type
@@ -15886,17 +16241,22 @@ class PydevdSystemInfoResponseBody(BaseSchema):
         "process": {
             "description": "Information about the current process.",
             "type": "PydevdProcessInfo"
+        },
+        "pydevd": {
+            "description": "Information about pydevd.",
+            "type": "PydevdInfo"
         }
     }
-    __refs__ = set(['python', 'platform', 'process'])
+    __refs__ = set(['python', 'platform', 'process', 'pydevd'])
 
     __slots__ = list(__props__.keys()) + ['kwargs']
 
-    def __init__(self, python, platform, process, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+    def __init__(self, python, platform, process, pydevd, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
         """
         :param PydevdPythonInfo python: Information about the python version running in the current process.
         :param PydevdPlatformInfo platform: Information about the plarforn on which the current process is running.
         :param PydevdProcessInfo process: Information about the current process.
+        :param PydevdInfo pydevd: Information about pydevd.
         """
         if python is None:
             self.python = PydevdPythonInfo()
@@ -15910,6 +16270,10 @@ class PydevdSystemInfoResponseBody(BaseSchema):
             self.process = PydevdProcessInfo()
         else:
             self.process = PydevdProcessInfo(update_ids_from_dap=update_ids_from_dap, **process) if process.__class__ !=  PydevdProcessInfo else process
+        if pydevd is None:
+            self.pydevd = PydevdInfo()
+        else:
+            self.pydevd = PydevdInfo(update_ids_from_dap=update_ids_from_dap, **pydevd) if pydevd.__class__ !=  PydevdInfo else pydevd
         self.kwargs = kwargs
 
 
@@ -15917,10 +16281,47 @@ class PydevdSystemInfoResponseBody(BaseSchema):
         python = self.python
         platform = self.platform
         process = self.process
+        pydevd = self.pydevd
         dct = {
             'python': python.to_dict(update_ids_to_dap=update_ids_to_dap),
             'platform': platform.to_dict(update_ids_to_dap=update_ids_to_dap),
             'process': process.to_dict(update_ids_to_dap=update_ids_to_dap),
+            'pydevd': pydevd.to_dict(update_ids_to_dap=update_ids_to_dap),
+        }
+        dct.update(self.kwargs)
+        return dct
+
+
+@register
+class PydevdAuthorizeResponseBody(BaseSchema):
+    """
+    "body" of PydevdAuthorizeResponse
+
+    Note: automatically generated code. Do not edit manually.
+    """
+
+    __props__ = {
+        "clientAccessToken": {
+            "type": "string",
+            "description": "The access token to access the client (i.e.: usually the IDE)."
+        }
+    }
+    __refs__ = set()
+
+    __slots__ = list(__props__.keys()) + ['kwargs']
+
+    def __init__(self, clientAccessToken, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
+        """
+        :param string clientAccessToken: The access token to access the client (i.e.: usually the IDE).
+        """
+        self.clientAccessToken = clientAccessToken
+        self.kwargs = kwargs
+
+
+    def to_dict(self, update_ids_to_dap=False):  # noqa (update_ids_to_dap may be unused)
+        clientAccessToken = self.clientAccessToken
+        dct = {
+            'clientAccessToken': clientAccessToken,
         }
         dct.update(self.kwargs)
         return dct

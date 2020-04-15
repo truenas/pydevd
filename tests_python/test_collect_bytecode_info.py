@@ -3,8 +3,11 @@ import os.path
 import sys
 import traceback
 
-from _pydevd_bundle.pydevd_collect_try_except_info import collect_try_except_info
-from tests_python.debugger_unittest import IS_CPYTHON
+from _pydevd_bundle.pydevd_collect_bytecode_info import collect_try_except_info, \
+    collect_return_info
+from tests_python.debugger_unittest import IS_CPYTHON, IS_PYPY
+from tests_python.debug_constants import IS_PY2
+from _pydevd_bundle.pydevd_constants import IS_PY38_OR_GREATER, IS_JYTHON
 
 
 def _method_call_with_error():
@@ -164,11 +167,18 @@ def test_collect_try_except_info(data_regression):
         if key.startswith('_method'):
             info = collect_try_except_info(method.__code__, use_func_first_line=True)
 
-            if sys.version_info[:2] >= (3, 7):
-                for try_except_info in info:
-                    # On 3.7 the last bytecode actually has a different start line.
-                    if try_except_info.except_end_line == 8:
-                        try_except_info.except_end_line = 9
+            if key == "_method_try_except":
+                if sys.version_info[:2] == (3, 7):
+                    for try_except_info in info:
+                        # On 3.7 the last bytecode actually has a different start line.
+                        if try_except_info.except_end_line == 8:
+                            try_except_info.except_end_line = 9
+
+                elif sys.version_info[:2] >= (3, 8):
+                    for try_except_info in info:
+                        # On 3.8 the last bytecode actually has a different start line.
+                        if try_except_info.except_end_line == 7:
+                            try_except_info.except_end_line = 9
 
             method_to_info[key] = [str(x) for x in info]
 
@@ -189,10 +199,64 @@ def test_collect_try_except_info2():
 
     code = method.__code__
     lst = collect_try_except_info(code, use_func_first_line=True)
-    if IS_CPYTHON:
+    if IS_CPYTHON or IS_PYPY:
         assert str(lst) == '[{try:1 except 3 end block 5 raises: 5}]'
     else:
         assert lst == []
+
+
+@pytest.mark.skipif(IS_JYTHON, reason='Jython does not have bytecode support.')
+def test_collect_return_info():
+
+    def method():
+        return 1
+
+    assert str(collect_return_info(method.__code__, use_func_first_line=True)) == '[{return: 1}]'
+
+    def method2():
+        pass
+
+    assert str(collect_return_info(method2.__code__, use_func_first_line=True)) == '[{return: 1}]'
+
+    def method3():
+        yield 1
+        yield 2
+
+    assert str(collect_return_info(method3.__code__, use_func_first_line=True)) == '[{return: 2}]'
+
+    def method4():
+        return (1,
+                2,
+                3,
+                4)
+
+    assert str(collect_return_info(method4.__code__, use_func_first_line=True)) == \
+        '[{return: 1}]' if IS_PY38_OR_GREATER else '[{return: 4}]'
+
+    def method5():
+        return \
+            \
+            1
+
+    assert str(collect_return_info(method5.__code__, use_func_first_line=True)) == \
+        '[{return: 1}]' if IS_PY38_OR_GREATER else '[{return: 3}]'
+
+    if not IS_PY2:
+        # return in generator is not valid for python 2.
+        code = '''
+def method():
+    if a:
+        yield 1
+        yield 2
+        return 1
+    else:
+        pass
+'''
+
+        scope = {}
+        exec(code, scope)
+        assert str(collect_return_info(scope['method'].__code__, use_func_first_line=True)) == \
+            '[{return: 4}, {return: 6}]'
 
 
 def _create_entry(instruction):
@@ -216,7 +280,7 @@ def debug_test_iter_bytecode(data_regression):
             info = []
 
             if sys.version_info[0] < 3:
-                from _pydevd_bundle.pydevd_collect_try_except_info import _iter_as_bytecode_as_instructions_py2
+                from _pydevd_bundle.pydevd_collect_bytecode_info import _iter_as_bytecode_as_instructions_py2
                 iter_in = _iter_as_bytecode_as_instructions_py2(method.__code__)
             else:
                 iter_in = dis.Bytecode(method)
