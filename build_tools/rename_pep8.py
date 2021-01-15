@@ -33,8 +33,8 @@ def find_matches():
     found = set()
     for path, initial_contents in iter_files_in_dir(os.path.dirname(os.path.dirname(__file__))):
         found.update(find_matches_in_contents(initial_contents))
-    print '\n'.join(sorted(found))
-    print 'Total', len(found)
+    print ('\n'.join(sorted(found)))
+    print ('Total', len(found))
 
 def substitute_contents(re_name_to_new_val, initial_contents):
     contents = initial_contents
@@ -48,7 +48,7 @@ def make_replace():
     for path, initial_contents in iter_files_in_dir(os.path.dirname(os.path.dirname(__file__))):
         contents = substitute_contents(re_name_to_new_val, initial_contents)
         if contents != initial_contents:
-            print 'Changed something at: %s' % (path,)
+            print ('Changed something at: %s' % (path,))
 
             for val in re_name_to_new_val.itervalues():
                 # Check in initial contents to see if it already existed!
