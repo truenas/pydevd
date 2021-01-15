@@ -104,13 +104,13 @@ def build():
         # set VS100COMNTOOLS=C:\Program Files (x86)\Microsoft Visual Studio 9.0\Common7\Tools
 
         env = os.environ.copy()
-        if sys.version_info[:2] in ((2, 6), (2, 7), (3, 5), (3, 6), (3, 7), (3, 8)):
+        if sys.version_info[:2] in ((2, 6), (2, 7), (3, 5), (3, 6), (3, 7), (3, 8), (3, 9)):
             import setuptools  # We have to import it first for the compiler to be found
             from distutils import msvc9compiler
 
             if sys.version_info[:2] in ((2, 6), (2, 7)):
                 vcvarsall = msvc9compiler.find_vcvarsall(9.0)
-            elif sys.version_info[:2] in ((3, 5), (3, 6), (3, 7), (3, 8)):
+            elif sys.version_info[:2] in ((3, 5), (3, 6), (3, 7), (3, 8), (3, 9)):
                 vcvarsall = msvc9compiler.find_vcvarsall(14.0)
             if vcvarsall is None or not os.path.exists(vcvarsall):
                 raise RuntimeError('Error finding vcvarsall.')
@@ -158,17 +158,18 @@ def build():
 
 
 if __name__ == '__main__':
-    use_cython = os.getenv('PYDEVD_USE_CYTHON', None)
-    if use_cython == 'YES':
+    use_cython = os.getenv('PYDEVD_USE_CYTHON', '').lower()
+    # Note: don't import pydevd during build (so, accept just yes/no in this case).
+    if use_cython == 'yes':
         build()
-    elif use_cython == 'NO':
+    elif use_cython == 'no':
         remove_binaries(['.pyd', '.so'])
-    elif use_cython is None:
+    elif not use_cython:
         # Regular process
         if '--no-regenerate-files' not in sys.argv:
             generate_dont_trace_files()
             generate_cython_module()
         build()
     else:
-        raise RuntimeError('Unexpected value for PYDEVD_USE_CYTHON: %s (accepted: YES, NO)' % (use_cython,))
+        raise RuntimeError('Unexpected value for PYDEVD_USE_CYTHON: %s (accepted: yes, no)' % (use_cython,))
 

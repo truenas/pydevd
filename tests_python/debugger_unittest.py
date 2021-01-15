@@ -81,6 +81,8 @@ CMD_THREAD_RESUME_SINGLE_NOTIFICATION = 158
 CMD_STEP_OVER_MY_CODE = 159
 CMD_STEP_RETURN_MY_CODE = 160
 
+CMD_SET_PY_EXCEPTION = 161
+
 CMD_REDIRECT_OUTPUT = 200
 CMD_GET_NEXT_STATEMENT_TARGETS = 201
 CMD_SET_PROJECT_ROOTS = 202
@@ -403,7 +405,14 @@ class DebuggerRunner(object):
         ret = [
             writer.get_pydevd_file(),
             '--DEBUG_RECORD_SOCKET_READS',
-            '--qt-support',
+        ]
+
+        if not IS_PY36_OR_GREATER or not IS_CPYTHON or not TEST_CYTHON:
+            # i.e.: in frame-eval mode we support native threads, whereas
+            # on other cases we need the qt monkeypatch.
+            ret += ['--qt-support']
+
+        ret += [
             '--client',
             localhost,
             '--port',
@@ -477,6 +486,7 @@ class DebuggerRunner(object):
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
             cwd=writer.get_cwd() if writer is not None else '.',
             env=env,
         )
@@ -511,6 +521,15 @@ class DebuggerRunner(object):
                 yield dct_with_stdout_stder
             except:
                 fail_with_message = True
+                # Let's print the actuayl exception here (it doesn't appear properly on Python 2 and
+                # on Python 3 it's hard to find because pytest output is too verbose).
+                sys.stderr.write('***********\n')
+                sys.stderr.write('***********\n')
+                sys.stderr.write('***********\n')
+                traceback.print_exc()
+                sys.stderr.write('***********\n')
+                sys.stderr.write('***********\n')
+                sys.stderr.write('***********\n')
                 raise
 
             if not writer.finished_ok:
@@ -539,7 +558,7 @@ class DebuggerRunner(object):
                             continue
 
                         if not shown_intermediate and (time.time() - initial_time > (TIMEOUT / 3.)):  # 1/3 of timeout
-                            print('Warning: writer thread exited and process still did not (%.2fs seconds elapsed).' % (time.time() - initial_time,))
+                            print('Warning: writer thread exited and process still did not (%.2f seconds elapsed).' % (time.time() - initial_time,))
                             shown_intermediate = True
 
                         if time.time() - initial_time > ((TIMEOUT / 3.) * 2.):  # 2/3 of timeout
@@ -556,7 +575,7 @@ class DebuggerRunner(object):
                             process.kill()
                             time.sleep(.2)
                             self.fail_with_message(
-                                "The other process should've exited but still didn't (%.2fs seconds timeout for process to exit)." % (time.time() - initial_time,),
+                                "The other process should've exited but still didn't (%.2f seconds timeout for process to exit)." % (time.time() - initial_time,),
                                 stdout, stderr, writer
                             )
                 time.sleep(.2)
@@ -749,11 +768,13 @@ class AbstractWriterThread(threading.Thread):
         dirname = os.path.dirname(dirname)
         return os.path.abspath(os.path.join(dirname, 'pydevconsole.py'))
 
-    def get_line_index_with_content(self, line_content):
+    def get_line_index_with_content(self, line_content, filename=None):
         '''
         :return the line index which has the given content (1-based).
         '''
-        with open(self.TEST_FILE, 'r') as stream:
+        if filename is None:
+            filename = self.TEST_FILE
+        with open(filename, 'r') as stream:
             for i_line, line in enumerate(stream):
                 if line_content in line:
                     return i_line + 1
@@ -893,7 +914,7 @@ class AbstractWriterThread(threading.Thread):
         # 10 seconds default timeout
         timeout = int(os.environ.get('PYDEVD_CONNECT_TIMEOUT', 10))
         s.settimeout(timeout)
-        for _i in range(6):
+        for _i in range(20):
             try:
                 s.connect((host, port))
                 break
@@ -1000,7 +1021,7 @@ class AbstractWriterThread(threading.Thread):
             assert frame_file.endswith(file), 'Expected hit to be in file %s, was: %s' % (file, frame_file)
 
         if line is not None:
-            assert line == frame_line, 'Expected hit to be in line %s, was: %s' % (line, frame_line)
+            assert line == frame_line, 'Expected hit to be in line %s, was: %s (in file: %s)' % (line, frame_line, frame_file)
 
         if name is not None:
             if not isinstance(name, (list, tuple, set)):
@@ -1259,6 +1280,11 @@ class AbstractWriterThread(threading.Thread):
         self.log.append('write_load_source')
         self.write("%s\t%s\t%s" % (CMD_LOAD_SOURCE, self.next_seq(), filename,))
 
+    def write_load_source_from_frame_id(self, frame_id):
+        from _pydevd_bundle.pydevd_comm_constants import CMD_LOAD_SOURCE_FROM_FRAME_ID
+        self.log.append('write_load_source_from_frame_id')
+        self.write("%s\t%s\t%s" % (CMD_LOAD_SOURCE_FROM_FRAME_ID, self.next_seq(), frame_id,))
+
     def write_kill_thread(self, thread_id):
         self.write("%s\t%s\t%s" % (CMD_THREAD_KILL, self.next_seq(), thread_id,))
 
@@ -1296,6 +1322,9 @@ class AbstractWriterThread(threading.Thread):
 
     def wait_for_get_thread_stack_message(self):
         return self.wait_for_message(CMD_GET_THREAD_STACK)
+
+    def wait_for_curr_exc_stack(self):
+        return self.wait_for_message(CMD_SEND_CURR_EXCEPTION_TRACE)
 
     def wait_for_json_message(self, accept_message, unquote_msg=True, timeout=None):
         last = self.wait_for_message(accept_message, unquote_msg, expect_xml=False, timeout=timeout)
@@ -1400,14 +1429,7 @@ class AbstractWriterThread(threading.Thread):
 
 
 def _get_debugger_test_file(filename):
-    try:
-        rPath = os.path.realpath  # @UndefinedVariable
-    except:
-        # jython does not support os.path.realpath
-        # realpath is a no-op on systems without islink support
-        rPath = os.path.abspath
-
-    ret = os.path.normcase(rPath(os.path.join(os.path.dirname(__file__), filename)))
+    ret = os.path.abspath(os.path.join(os.path.dirname(__file__), filename))
     if not os.path.exists(ret):
         ret = os.path.join(os.path.dirname(__file__), 'resources', filename)
     if not os.path.exists(ret):

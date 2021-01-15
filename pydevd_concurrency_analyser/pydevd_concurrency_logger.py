@@ -9,6 +9,7 @@ from _pydevd_bundle.pydevd_net_command import NetCommand
 from pydevd_concurrency_analyser.pydevd_thread_wrappers import ObjectWrapper, wrap_attr
 import pydevd_file_utils
 from _pydev_bundle import pydev_log
+import sys
 
 file_system_encoding = getfilesystemencoding()
 
@@ -28,11 +29,6 @@ QUEUE_METHODS = ['put', 'get']
 
 # return time since epoch in milliseconds
 cur_time = lambda: int(round(time.time() * 1000000))
-
-try:
-    import asyncio  # @UnresolvedImport
-except:
-    pass
 
 
 def get_text_list_for_frame(frame):
@@ -54,12 +50,12 @@ def get_text_list_for_frame(frame):
 
             # print "name is ", myName
 
-            filename = pydevd_file_utils.get_abs_path_real_path_and_base_from_frame(curFrame)[1]
+            absolute_filename = pydevd_file_utils.get_abs_path_real_path_and_base_from_frame(curFrame)[0]
 
-            myFile = pydevd_file_utils.norm_file_to_client(filename)
+            my_file, _applied_mapping = pydevd_file_utils.map_file_to_client(absolute_filename)
 
-            # print "file is ", myFile
-            # myFile = inspect.getsourcefile(curFrame) or inspect.getfile(frame)
+            # print "file is ", my_file
+            # my_file = inspect.getsourcefile(curFrame) or inspect.getfile(frame)
 
             myLine = str(curFrame.f_lineno)
             # print "line is ", myLine
@@ -69,7 +65,7 @@ def get_text_list_for_frame(frame):
 
             variables = ''
             cmdTextList.append('<frame id="%s" name="%s" ' % (myId , pydevd_xml.make_valid_xml_value(myName)))
-            cmdTextList.append('file="%s" line="%s">' % (quote(myFile, '/>_= \t'), myLine))
+            cmdTextList.append('file="%s" line="%s">' % (quote(my_file, '/>_= \t'), myLine))
             cmdTextList.append(variables)
             cmdTextList.append("</frame>")
             curFrame = curFrame.f_back
@@ -141,7 +137,7 @@ class ThreadingLogger:
                 back = frame.f_back
                 if not back:
                     return
-                _, name, back_base = pydevd_file_utils.get_abs_path_real_path_and_base_from_frame(back)
+                name, _, back_base = pydevd_file_utils.get_abs_path_real_path_and_base_from_frame(back)
                 event_time = cur_time() - self.start_time
                 method_name = frame.f_code.co_name
 
@@ -198,7 +194,7 @@ class ThreadingLogger:
                     if back_base in DONT_TRACE_THREADING:
                         # do not trace methods called from threading
                         return
-                    back_back_base = pydevd_file_utils.get_abs_path_real_path_and_base_from_frame(back.f_back)[-1]
+                    back_back_base = pydevd_file_utils.get_abs_path_real_path_and_base_from_frame(back.f_back)[2]
                     back = back.f_back
                     if back_back_base in DONT_TRACE_THREADING:
                         # back_back_base is the file, where the method was called froms
@@ -255,6 +251,12 @@ class AsyncioLogger:
         self.start_time = cur_time()
 
     def get_task_id(self, frame):
+        asyncio = sys.modules.get('asyncio')
+        if asyncio is None:
+            # If asyncio was not imported, there's nothing to be done
+            # (also fixes issue where multiprocessing is imported due
+            # to asyncio).
+            return None
         while frame is not None:
             if "self" in frame.f_locals:
                 self_obj = frame.f_locals["self"]
@@ -275,6 +277,14 @@ class AsyncioLogger:
 
         if not hasattr(frame, "f_back") or frame.f_back is None:
             return
+
+        asyncio = sys.modules.get('asyncio')
+        if asyncio is None:
+            # If asyncio was not imported, there's nothing to be done
+            # (also fixes issue where multiprocessing is imported due
+            # to asyncio).
+            return
+
         back = frame.f_back
 
         if "self" in frame.f_locals:

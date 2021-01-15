@@ -40,6 +40,11 @@ class _OrderedSet(object):
             self._contents_as_set.add(x)
             self._contents.append(x)
 
+    def discard(self, x):
+        if x in self._contents_as_set:
+            self._contents_as_set.remove(x)
+            self._contents.remove(x)
+
     def copy(self):
         return _OrderedSet(self._contents)
 
@@ -135,6 +140,8 @@ def create_classes_to_generate_structure(json_schema_data):
         if isinstance(description, (list, tuple)):
             description = '\n'.join(description)
 
+        if name == 'ModulesRequest':  # Hack to accept modules request without arguments (ptvsd: 2050).
+            required.discard('arguments')
         class_to_generatees[name] = dict(
             name=name,
             properties=properties,
@@ -228,7 +235,7 @@ def update_class_to_generate_register_dec(classes_to_generate, class_to_generate
                 command = classes_to_generate[request_name]['properties'].get('command')
             else:
                 if response_name == 'ErrorResponse':
-                    command = {'enum' : ['error']}
+                    command = {'enum': ['error']}
                 else:
                     raise AssertionError('Unhandled: %s' % (response_name,))
 
@@ -391,7 +398,8 @@ def update_class_to_generate_init(class_to_generate):
                 ref = prop['type']
                 ref_data = ref.ref_data
                 if ref_data.get('is_enum', False):
-                    init_body.append('    assert %s in %s.VALID_VALUES' % (prop_name, str(ref)))
+                    init_body.append('    if %s is not None:' % (prop_name,))
+                    init_body.append('        assert %s in %s.VALID_VALUES' % (prop_name, str(ref)))
                     init_body.append('    self.%(prop_name)s = %(prop_name)s' % dict(
                         prop_name=prop_name))
                 else:
@@ -440,7 +448,7 @@ def update_class_to_generate_init(class_to_generate):
 
     # Note: added kwargs because some messages are expected to be extended by the user (so, we'll actually
     # make all extendable so that we don't have to worry about which ones -- we loose a little on typing,
-    # but may be better than doing a whitelist based on something only pointed out in the documentation).
+    # but may be better than doing a allow list based on something only pointed out in the documentation).
     class_to_generate['init'] = '''def __init__(self%(args)s, update_ids_from_dap=False, **kwargs):  # noqa (update_ids_from_dap may be unused)
     """
 %(docstring)s

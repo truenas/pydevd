@@ -8,6 +8,20 @@ from _pydevd_bundle.pydevd_constants import IS_PY3K
 LIB_FILE = 1
 PYDEV_FILE = 2
 
+DONT_TRACE_DIRS = {
+    '_pydev_bundle': PYDEV_FILE,
+    '_pydev_imps': PYDEV_FILE,
+    '_pydev_runfiles': PYDEV_FILE,
+    '_pydevd_bundle': PYDEV_FILE,
+    '_pydevd_frame_eval': PYDEV_FILE,
+    'pydev_ipython': PYDEV_FILE,
+    'pydev_sitecustomize': PYDEV_FILE,
+    'pydevd_attach_to_process': PYDEV_FILE,
+    'pydevd_concurrency_analyser': PYDEV_FILE,
+    'pydevd_plugins': PYDEV_FILE,
+    'test_pydevd_reload': PYDEV_FILE,
+}
+
 DONT_TRACE = {
     # commonly used things from the stdlib that we don't want to trace
     'Queue.py':LIB_FILE,
@@ -55,6 +69,14 @@ DONT_TRACE = {
     'pydev_monkey_qt.py': PYDEV_FILE,
     'pydev_override.py': PYDEV_FILE,
     'pydev_run_in_console.py': PYDEV_FILE,
+    'pydev_runfiles.py': PYDEV_FILE,
+    'pydev_runfiles_coverage.py': PYDEV_FILE,
+    'pydev_runfiles_nose.py': PYDEV_FILE,
+    'pydev_runfiles_parallel.py': PYDEV_FILE,
+    'pydev_runfiles_parallel_client.py': PYDEV_FILE,
+    'pydev_runfiles_pytest2.py': PYDEV_FILE,
+    'pydev_runfiles_unittest.py': PYDEV_FILE,
+    'pydev_runfiles_xml_rpc.py': PYDEV_FILE,
     'pydev_umd.py': PYDEV_FILE,
     'pydev_versioncheck.py': PYDEV_FILE,
     'pydevconsole.py': PYDEV_FILE,
@@ -65,6 +87,7 @@ DONT_TRACE = {
     'pydevd_api.py': PYDEV_FILE,
     'pydevd_base_schema.py': PYDEV_FILE,
     'pydevd_breakpoints.py': PYDEV_FILE,
+    'pydevd_code_to_source.py': PYDEV_FILE,
     'pydevd_collect_bytecode_info.py': PYDEV_FILE,
     'pydevd_comm.py': PYDEV_FILE,
     'pydevd_comm_constants.py': PYDEV_FILE,
@@ -74,6 +97,7 @@ DONT_TRACE = {
     'pydevd_constants.py': PYDEV_FILE,
     'pydevd_custom_frames.py': PYDEV_FILE,
     'pydevd_cython_wrapper.py': PYDEV_FILE,
+    'pydevd_daemon_thread.py': PYDEV_FILE,
     'pydevd_defaults.py': PYDEV_FILE,
     'pydevd_dont_trace.py': PYDEV_FILE,
     'pydevd_dont_trace_files.py': PYDEV_FILE,
@@ -112,7 +136,9 @@ DONT_TRACE = {
     'pydevd_source_mapping.py': PYDEV_FILE,
     'pydevd_stackless.py': PYDEV_FILE,
     'pydevd_suspended_frames.py': PYDEV_FILE,
+    'pydevd_thread_lifecycle.py': PYDEV_FILE,
     'pydevd_thread_wrappers.py': PYDEV_FILE,
+    'pydevd_timeout.py': PYDEV_FILE,
     'pydevd_trace_api.py': PYDEV_FILE,
     'pydevd_trace_dispatch.py': PYDEV_FILE,
     'pydevd_trace_dispatch_regular.py': PYDEV_FILE,

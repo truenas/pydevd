@@ -1,16 +1,82 @@
 import threading
 
-from _pydevd_bundle.pydevd_comm import pydevd_find_thread_by_id
 from _pydevd_bundle.pydevd_utils import convert_dap_log_message_to_expression
-from tests_python.debug_constants import IS_PY26, IS_PY3K
+from tests_python.debug_constants import IS_PY26, IS_PY3K, TEST_GEVENT, IS_CPYTHON
 import sys
-from _pydevd_bundle.pydevd_constants import IS_CPYTHON, IS_WINDOWS
+from _pydevd_bundle.pydevd_constants import IS_WINDOWS, IS_PY2, IS_PYPY
 import pytest
 import os
+import codecs
+from _pydevd_bundle.pydevd_thread_lifecycle import pydevd_find_thread_by_id
 
 
+def test_expression_to_evaluate():
+    from _pydevd_bundle.pydevd_vars import _expression_to_evaluate
+    assert _expression_to_evaluate(b'expr') == b'expr'
+    assert _expression_to_evaluate(b'  expr') == b'expr'
+    assert _expression_to_evaluate(b'for a in b:\n  foo') == b'for a in b:\n  foo'
+    assert _expression_to_evaluate(b'  for a in b:\n  foo') == b'for a in b:\nfoo'
+    assert _expression_to_evaluate(b'  for a in b:\nfoo') == b'  for a in b:\nfoo'
+    assert _expression_to_evaluate(b'\tfor a in b:\n\t\tfoo') == b'for a in b:\n\tfoo'
+
+    if IS_PY2:
+        assert _expression_to_evaluate(u'  expr') == (codecs.BOM_UTF8 + b'expr')
+    else:
+        assert _expression_to_evaluate(u'  expr') == u'expr'
+        assert _expression_to_evaluate(u'  for a in expr:\n  pass') == u'for a in expr:\npass'
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason='Brittle on Windows.')
 def test_is_main_thread():
+    '''
+    This is now skipped due to it failing sometimes (only on Windows).
+
+    I (fabioz) am not 100% sure on why this happens, but when this happens the initial thread for
+    the tests seems to be a non main thread.
+
+    i.e.: With an autouse fixture with a scope='session' with the code and error message below, it's
+    possible to see that at even at the `conftest` import (where indent_at_import is assigned) the
+    current thread is already not the main thread.
+
+    As far as I know this seems to be an issue in how pytest-xdist is running the tests (i.e.:
+    I couldn't reproduce this without running with `python -m pytest -n 0 ...`).
+
+    -------- Code to check error / error output ----------
+
     from _pydevd_bundle.pydevd_utils import is_current_thread_main_thread
+    import threading
+    indent_at_import = threading.get_ident()
+
+    @pytest.yield_fixture(autouse=True, scope='session')
+    def check_main_thread_session(request):
+        if not is_current_thread_main_thread():
+            error_msg = 'Current thread does not seem to be a main thread at the start of the session. Details:\n'
+            current_thread = threading.current_thread()
+            error_msg += 'Current thread: %s\n' % (current_thread,)
+            error_msg += 'Current thread ident: %s\n' % (current_thread.ident,)
+            error_msg += 'ident at import: %s\n' % (indent_at_import,)
+            error_msg += 'curr ident: %s\n' % (threading.get_ident(),)
+
+            if hasattr(threading, 'main_thread'):
+                error_msg += 'Main thread found: %s\n' % (threading.main_thread(),)
+                error_msg += 'Main thread id: %s\n' % (threading.main_thread().ident,)
+            else:
+                error_msg += 'Current main thread not instance of: %s (%s)\n' % (
+                    threading._MainThread, current_thread.__class__.__mro__,)
+
+>           raise AssertionError(error_msg)
+E           AssertionError: Current thread does not seem to be a main thread at the start of the session. Details:
+E           Current thread: <_DummyThread(Dummy-2, started daemon 7072)>
+E           Current thread ident: 7072
+E           ident at import: 7072
+E           curr ident: 7072
+E           Main thread found: <_MainThread(MainThread, started 5924)>
+E           Main thread id: 5924
+
+conftest.py:67: AssertionError
+    '''
+    from _pydevd_bundle.pydevd_utils import is_current_thread_main_thread
+    from _pydevd_bundle.pydevd_utils import dump_threads
     if not is_current_thread_main_thread():
         error_msg = 'Current thread does not seem to be a main thread. Details:\n'
         current_thread = threading.current_thread()
@@ -22,6 +88,14 @@ def test_is_main_thread():
             error_msg += 'Current main thread not instance of: %s (%s)' % (
                 threading._MainThread, current_thread.__class__.__mro__,)
 
+        try:
+            from StringIO import StringIO
+        except:
+            from io import StringIO
+
+        stream = StringIO()
+        dump_threads(stream=stream)
+        error_msg += '\n\n' + stream.getvalue()
         raise AssertionError(error_msg)
 
     class NonMainThread(threading.Thread):
@@ -277,9 +351,10 @@ def _build_launch_env():
     return cwd, environ
 
 
-def _check_in_separate_process(method_name, module_name='test_utilities'):
+def _check_in_separate_process(method_name, module_name='test_utilities', update_env={}):
     import subprocess
     cwd, environ = _build_launch_env()
+    environ.update(update_env)
 
     subprocess.check_call(
         [sys.executable, '-c', 'import %(module_name)s;%(module_name)s.%(method_name)s()' % dict(
@@ -336,3 +411,65 @@ def test_get_ppid():
     else:
         assert api._get_windows_ppid() is not None
 
+
+def _check_gevent(expect_msg):
+    from _pydevd_bundle.pydevd_utils import notify_about_gevent_if_needed
+    assert not notify_about_gevent_if_needed()
+    import gevent
+    assert not notify_about_gevent_if_needed()
+    import gevent.monkey
+    assert not notify_about_gevent_if_needed()
+    gevent.monkey.patch_all()
+    assert notify_about_gevent_if_needed() == expect_msg
+
+
+def check_notify_on_gevent_loaded():
+    _check_gevent(True)
+
+
+def check_dont_notify_on_gevent_loaded():
+    _check_gevent(False)
+
+
+@pytest.mark.skipif(not TEST_GEVENT, reason='Gevent not installed.')
+def test_gevent_notify():
+    _check_in_separate_process('check_notify_on_gevent_loaded', update_env={'GEVENT_SUPPORT': ''})
+    _check_in_separate_process('check_dont_notify_on_gevent_loaded', update_env={'GEVENT_SUPPORT': 'True'})
+
+
+@pytest.mark.skipif(True, reason='Skipping because running this test can interrupt the test suite execution.')
+def test_interrupt_main_thread():
+    from _pydevd_bundle.pydevd_utils import interrupt_main_thread
+    import time
+
+    main_thread = threading.current_thread()
+
+    def interrupt():
+        # sleep here so that the main thread in the test can get to the sleep too (otherwise
+        # if we interrupt too fast we won't really check that the sleep itself
+        # got interrupted -- although if that happens on some tests runs it's
+        # not really an issue either).
+        time.sleep(1)
+        interrupt_main_thread(main_thread)
+
+    if IS_PYPY:
+        # On PyPy a time.sleep() is not being properly interrupted,
+        # so, let's just check that it throws the KeyboardInterrupt in the
+        # next instruction.
+        timeout = 2
+    else:
+        timeout = 20
+    initial_time = time.time()
+    try:
+        t = threading.Thread(target=interrupt)
+        t.start()
+        time.sleep(timeout)
+    except KeyboardInterrupt:
+        if not IS_PYPY:
+            actual_timeout = time.time() - initial_time
+            # If this fails it means that although we interrupted Python actually waited for the next
+            # instruction to send the event and didn't really interrupt the thread.
+            assert actual_timeout < timeout, 'Expected the actual timeout (%s) to be < than the timeout (%s)' % (
+                actual_timeout, timeout)
+    else:
+        raise AssertionError('KeyboardInterrupt not generated in main thread.')

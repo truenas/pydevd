@@ -9,7 +9,7 @@ from pydevd_file_utils import get_abs_path_real_path_and_base_from_frame, NORM_P
 # from cpython.object cimport PyObject
 # from cpython.ref cimport Py_INCREF, Py_XDECREF
 # ELSE
-from _pydevd_bundle.pydevd_frame import PyDBFrame
+from _pydevd_bundle.pydevd_frame import PyDBFrame, is_unhandled_exception
 # ENDIF
 
 # IFDEF CYTHON
@@ -128,6 +128,9 @@ def fix_top_level_trace_and_get_trace_func(py_db, frame):
                 force_only_unhandled_tracer = True
                 break
 
+        elif name == 'pydevd_tracing':
+            return None, False
+
         elif f_unhandled.f_back is None:
             break
 
@@ -181,7 +184,7 @@ def fix_top_level_trace_and_get_trace_func(py_db, frame):
             return f_trace, False
 
     thread_tracer = additional_info.thread_tracer
-    if thread_tracer is None:
+    if thread_tracer is None or thread_tracer._args[0] is not py_db:
         thread_tracer = ThreadTracer(args)
         additional_info.thread_tracer = thread_tracer
 
@@ -236,7 +239,7 @@ class TopLevelThreadTracerOnlyUnhandledExceptions(object):
 #
 #     cdef public object _frame_trace_dispatch;
 #     cdef public tuple _args;
-#     cdef public object _try_except_info;
+#     cdef public object try_except_infos;
 #     cdef public object _last_exc_arg;
 #     cdef public set _raise_lines;
 #     cdef public int _last_raise_line;
@@ -244,7 +247,7 @@ class TopLevelThreadTracerOnlyUnhandledExceptions(object):
 #     def __init__(self, frame_trace_dispatch, tuple args):
 #         self._frame_trace_dispatch = frame_trace_dispatch
 #         self._args = args
-#         self._try_except_info = None
+#         self.try_except_infos = None
 #         self._last_exc_arg = None
 #         self._raise_lines = set()
 #         self._last_raise_line = -1
@@ -265,7 +268,7 @@ class TopLevelThreadTracerNoBackFrame(object):
     def __init__(self, frame_trace_dispatch, args):
         self._frame_trace_dispatch = frame_trace_dispatch
         self._args = args
-        self._try_except_info = None
+        self.try_except_infos = None
         self._last_exc_arg = None
         self._raise_lines = set()
         self._last_raise_line = -1
@@ -288,42 +291,8 @@ class TopLevelThreadTracerNoBackFrame(object):
             try:
                 py_db, t, additional_info = self._args[0:3]
                 if not additional_info.suspended_at_unhandled:  # Note: only check it here, don't set.
-                    if frame.f_lineno in self._raise_lines:
+                    if is_unhandled_exception(self, py_db, frame, self._last_raise_line, self._raise_lines):
                         py_db.stop_on_unhandled_exception(py_db, t, additional_info, self._last_exc_arg)
-
-                    else:
-                        if self._try_except_info is None:
-                            self._try_except_info = py_db.collect_try_except_info(frame.f_code)
-                        if not self._try_except_info:
-                            # Consider the last exception as unhandled because there's no try..except in it.
-                            py_db.stop_on_unhandled_exception(py_db, t, additional_info, self._last_exc_arg)
-                        else:
-                            # Now, consider only the try..except for the raise
-                            valid_try_except_infos = []
-                            for try_except_info in self._try_except_info:
-                                if try_except_info.is_line_in_try_block(self._last_raise_line):
-                                    valid_try_except_infos.append(try_except_info)
-
-                            if not valid_try_except_infos:
-                                py_db.stop_on_unhandled_exception(py_db, t, additional_info, self._last_exc_arg)
-
-                            else:
-                                # Note: check all, not only the "valid" ones to cover the case
-                                # in "tests_python.test_tracing_on_top_level.raise_unhandled10"
-                                # where one try..except is inside the other with only a raise
-                                # and it's gotten in the except line.
-                                for try_except_info in self._try_except_info:
-                                    if try_except_info.is_line_in_except_block(frame.f_lineno):
-                                        if (
-                                                frame.f_lineno == try_except_info.except_line or
-                                                frame.f_lineno in try_except_info.raise_lines_in_except
-                                            ):
-                                            # In a raise inside a try..except block or some except which doesn't
-                                            # match the raised exception.
-                                            py_db.stop_on_unhandled_exception(py_db, t, additional_info, self._last_exc_arg)
-                                            break
-                                        else:
-                                            break  # exited during the except block (no exception raised)
             finally:
                 # Remove reference to exception after handling it.
                 self._last_exc_arg = None
@@ -374,7 +343,7 @@ class ThreadTracer(object):
         # cdef tuple frame_cache_key;
         # cdef dict cache_skips;
         # cdef bint is_stepping;
-        # cdef tuple abs_path_real_path_and_base;
+        # cdef tuple abs_path_canonical_path_and_base;
         # cdef PyDBAdditionalThreadInfo additional_info;
         # ENDIF
 
@@ -422,26 +391,25 @@ class ThreadTracer(object):
 
             try:
                 # Make fast path faster!
-                abs_path_real_path_and_base = NORM_PATHS_AND_BASE_CONTAINER[frame.f_code.co_filename]
+                abs_path_canonical_path_and_base = NORM_PATHS_AND_BASE_CONTAINER[frame.f_code.co_filename]
             except:
-                abs_path_real_path_and_base = get_abs_path_real_path_and_base_from_frame(frame)
+                abs_path_canonical_path_and_base = get_abs_path_real_path_and_base_from_frame(frame)
 
-            filename = abs_path_real_path_and_base[1]
-            file_type = py_db.get_file_type(frame, abs_path_real_path_and_base)  # we don't want to debug threading or anything related to pydevd
+            file_type = py_db.get_file_type(frame, abs_path_canonical_path_and_base)  # we don't want to debug threading or anything related to pydevd
 
             if file_type is not None:
                 if file_type == 1:  # inlining LIB_FILE = 1
-                    if not py_db.in_project_scope(frame, abs_path_real_path_and_base[0]):
-                        # if DEBUG: print('skipped: trace_dispatch (not in scope)', abs_path_real_path_and_base[-1], frame.f_lineno, event, frame.f_code.co_name, file_type)
+                    if not py_db.in_project_scope(frame, abs_path_canonical_path_and_base[0]):
+                        # if DEBUG: print('skipped: trace_dispatch (not in scope)', abs_path_canonical_path_and_base[2], frame.f_lineno, event, frame.f_code.co_name, file_type)
                         cache_skips[frame_cache_key] = 1
                         return None if event == 'call' else NO_FTRACE
                 else:
-                    # if DEBUG: print('skipped: trace_dispatch', abs_path_real_path_and_base[-1], frame.f_lineno, event, frame.f_code.co_name, file_type)
+                    # if DEBUG: print('skipped: trace_dispatch', abs_path_canonical_path_and_base[2], frame.f_lineno, event, frame.f_code.co_name, file_type)
                     cache_skips[frame_cache_key] = 1
                     return None if event == 'call' else NO_FTRACE
 
             if py_db.is_files_filter_enabled:
-                if py_db.apply_files_filter(frame, filename, False):
+                if py_db.apply_files_filter(frame, abs_path_canonical_path_and_base[0], False):
                     cache_skips[frame_cache_key] = 1
 
                     if is_stepping and additional_info.pydev_original_step_cmd in (CMD_STEP_INTO, CMD_STEP_INTO_MY_CODE) and not _global_notify_skipped_step_in:
@@ -467,7 +435,7 @@ class ThreadTracer(object):
             # reference to the frame).
             ret = PyDBFrame(
                 (
-                    py_db, filename, additional_info, t, frame_skips_cache, frame_cache_key,
+                    py_db, abs_path_canonical_path_and_base, additional_info, t, frame_skips_cache, frame_cache_key,
                 )
             ).trace_dispatch(frame, event, arg)
             if ret is None:
@@ -511,12 +479,12 @@ if USE_CUSTOM_SYS_CURRENT_FRAMES_MAP:
     # be a reasonable workaround until IronPython itself is able to provide that functionality).
     #
     # See: https://github.com/IronLanguages/main/issues/1630
-    from _pydevd_bundle.pydevd_additional_thread_info_regular import _tid_to_last_frame
+    from _pydevd_bundle.pydevd_constants import constructed_tid_to_last_frame
 
     _original_call = ThreadTracer.__call__
 
     def __call__(self, frame, event, arg):
-        _tid_to_last_frame[self._args[1].ident] = frame
+        constructed_tid_to_last_frame[self._args[1].ident] = frame
         return _original_call(self, frame, event, arg)
 
     ThreadTracer.__call__ = __call__

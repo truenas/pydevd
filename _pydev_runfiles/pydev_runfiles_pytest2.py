@@ -3,11 +3,15 @@ import pickle
 import zlib
 import base64
 import os
-import py
-from pydevd_file_utils import _NormFile
+from pydevd_file_utils import canonical_normalized_path
 import pytest
 import sys
 import time
+
+try:
+    from pathlib import Path
+except:
+    Path = None
 
 #=========================================================================
 # Load filters with tests we should skip
@@ -22,6 +26,16 @@ def _load_filters():
         if py_test_accept_filter:
             py_test_accept_filter = pickle.loads(
                 zlib.decompress(base64.b64decode(py_test_accept_filter)))
+
+            if Path is not None:
+                # Newer versions of pytest resolve symlinks, so, we
+                # may need to filter with a resolved path too.
+                new_dct = {}
+                for filename, value in py_test_accept_filter.items():
+                    new_dct[canonical_normalized_path(str(Path(filename).resolve()))] = value
+
+                py_test_accept_filter.update(new_dct)
+
         else:
             py_test_accept_filter = {}
 
@@ -96,12 +110,17 @@ def pytest_collection_modifyitems(session, config, items):
 
     new_items = []
     for item in items:
-        f = _NormFile(str(item.parent.fspath))
+        f = canonical_normalized_path(str(item.parent.fspath))
         name = item.name
 
         if f not in py_test_accept_filter:
             # print('Skip file: %s' % (f,))
             continue  # Skip the file
+
+        i = name.find('[')
+        name_without_parametrize = None
+        if i > 0:
+            name_without_parametrize = name[:i]
 
         accept_tests = py_test_accept_filter[f]
 
@@ -110,18 +129,25 @@ def pytest_collection_modifyitems(session, config, items):
         else:
             class_name = None
         for test in accept_tests:
-            # This happens when parameterizing pytest tests.
-            i = name.find('[')
-            if i > 0:
-                name = name[:i]
             if test == name:
                 # Direct match of the test (just go on with the default
                 # loading)
                 new_items.append(item)
                 break
 
+            if name_without_parametrize is not None and test == name_without_parametrize:
+                # This happens when parameterizing pytest tests on older versions
+                # of pytest where the test name doesn't include the fixture name
+                # in it.
+                new_items.append(item)
+                break
+
             if class_name is not None:
                 if test == class_name + '.' + name:
+                    new_items.append(item)
+                    break
+
+                if name_without_parametrize is not None and test == class_name + '.' + name_without_parametrize:
                     new_items.append(item)
                     break
 
@@ -137,15 +163,29 @@ def pytest_collection_modifyitems(session, config, items):
     pydev_runfiles_xml_rpc.notifyTestsCollected(len(items))
 
 
-from py.io import TerminalWriter
+try:
+    """
+    pytest > 5.4 uses own version of TerminalWriter based on py.io.TerminalWriter
+    and assumes there is a specific method TerminalWriter._write_source
+    so try load pytest version first or fallback to default one
+    """
+    from _pytest._io import TerminalWriter
+except ImportError:
+    from py.io import TerminalWriter
 
 
 def _get_error_contents_from_report(report):
     if report.longrepr is not None:
-        tw = TerminalWriter(stringio=True)
+        try:
+            tw = TerminalWriter(stringio=True)
+            stringio = tw.stringio
+        except TypeError:
+            import io
+            stringio = io.StringIO()
+            tw = TerminalWriter(file=stringio)
         tw.hasmarkup = False
         report.toterminal(tw)
-        exc = tw.stringio.getvalue()
+        exc = stringio.getvalue()
         s = exc.strip()
         if s:
             return s

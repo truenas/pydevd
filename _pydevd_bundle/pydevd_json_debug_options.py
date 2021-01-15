@@ -1,5 +1,6 @@
 import sys
 import json
+from _pydev_bundle import pydev_log
 try:
     import urllib
     urllib.unquote  # noqa
@@ -10,7 +11,7 @@ except Exception:
 class DebugOptions(object):
 
     __slots__ = [
-        'debug_stdlib',
+        'just_my_code',
         'redirect_output',
         'show_return_value',
         'break_system_exit_zero',
@@ -21,7 +22,7 @@ class DebugOptions(object):
     ]
 
     def __init__(self):
-        self.debug_stdlib = False
+        self.just_my_code = True
         self.redirect_output = False
         self.show_return_value = False
         self.break_system_exit_zero = False
@@ -38,7 +39,7 @@ class DebugOptions(object):
 
     def update_fom_debug_options(self, debug_options):
         if 'DEBUG_STDLIB' in debug_options:
-            self.debug_stdlib = debug_options.get('DEBUG_STDLIB')
+            self.just_my_code = not debug_options.get('DEBUG_STDLIB')
 
         if 'REDIRECT_OUTPUT' in debug_options:
             self.redirect_output = debug_options.get('REDIRECT_OUTPUT')
@@ -61,8 +62,12 @@ class DebugOptions(object):
         # Note: _max_exception_stack_frames cannot be set by debug options.
 
     def update_from_args(self, args):
-        if 'debugStdLib' in args:
-            self.debug_stdlib = bool_parser(args['debugStdLib'])
+        if 'justMyCode' in args:
+            self.just_my_code = bool_parser(args['justMyCode'])
+        else:
+            # i.e.: if justMyCode is provided, don't check the deprecated value
+            if 'debugStdLib' in args:
+                self.just_my_code = not bool_parser(args['debugStdLib'])
 
         if 'redirectOutput' in args:
             self.redirect_output = bool_parser(args['redirectOutput'])

@@ -17,6 +17,7 @@ import traceback
 import weakref
 import getpass as getpass_mod
 import functools
+import pydevd_file_utils
 
 from _pydev_bundle import pydev_imports, pydev_log
 from _pydev_bundle._pydev_filesystem_encoding import getfilesystemencoding
@@ -40,10 +41,10 @@ from _pydevd_bundle.pydevd_constants import (IS_JYTH_LESS25, get_thread_id, get_
     dict_keys, dict_iter_items, DebugInfoHolder, PYTHON_SUSPEND, STATE_SUSPEND, STATE_RUN, get_frame,
     clear_cached_thread_id, INTERACTIVE_MODE_AVAILABLE, SHOW_DEBUG_INFO_ENV, IS_PY34_OR_GREATER, IS_PY2, NULL,
     NO_FTRACE, IS_IRONPYTHON, JSON_PROTOCOL, IS_CPYTHON, HTTP_JSON_PROTOCOL, USE_CUSTOM_SYS_CURRENT_FRAMES_MAP, call_only_once,
-    ForkSafeLock)
+    ForkSafeLock, IGNORE_BASENAMES_STARTING_WITH, EXCEPTION_TYPE_UNHANDLED)
 from _pydevd_bundle.pydevd_defaults import PydevdCustomization  # Note: import alias used on pydev_monkey.
 from _pydevd_bundle.pydevd_custom_frames import CustomFramesContainer, custom_frames_container_init
-from _pydevd_bundle.pydevd_dont_trace_files import DONT_TRACE, PYDEV_FILE, LIB_FILE
+from _pydevd_bundle.pydevd_dont_trace_files import DONT_TRACE, PYDEV_FILE, LIB_FILE, DONT_TRACE_DIRS
 from _pydevd_bundle.pydevd_extension_api import DebuggerEventHandler
 from _pydevd_bundle.pydevd_frame_utils import add_exception_to_frame, remove_exception_from_frame
 from _pydevd_bundle.pydevd_net_command_factory_xml import NetCommandFactory
@@ -56,17 +57,18 @@ import pydev_ipython  # @UnusedImport
 from _pydevd_bundle.pydevd_source_mapping import SourceMapping
 from pydevd_concurrency_analyser.pydevd_concurrency_logger import ThreadingLogger, AsyncioLogger, send_concurrency_message, cur_time
 from pydevd_concurrency_analyser.pydevd_thread_wrappers import wrap_threads
-from pydevd_file_utils import get_abs_path_real_path_and_base_from_frame, NORM_PATHS_AND_BASE_CONTAINER, get_abs_path_real_path_and_base_from_file
-from pydevd_file_utils import get_fullname, rPath, get_package_dir
+from pydevd_file_utils import get_abs_path_real_path_and_base_from_frame, NORM_PATHS_AND_BASE_CONTAINER
+from pydevd_file_utils import get_fullname, get_package_dir
+from os.path import abspath as os_path_abspath
 import pydevd_tracing
 from _pydevd_bundle.pydevd_comm import (InternalThreadCommand, InternalThreadCommandForAnyThread,
     create_server_socket)
 from _pydevd_bundle.pydevd_comm import(InternalConsoleExec,
-    PyDBDaemonThread, _queue, ReaderThread, GetGlobalDebugger, get_global_debugger,
+    _queue, ReaderThread, GetGlobalDebugger, get_global_debugger,
     set_global_debugger, WriterThread,
     start_client, start_server, InternalGetBreakpointException, InternalSendCurrExceptionTrace,
-    InternalSendCurrExceptionTraceProceeded, run_as_pydevd_daemon_thread)
-
+    InternalSendCurrExceptionTraceProceeded)
+from _pydevd_bundle.pydevd_daemon_thread import PyDBDaemonThread, mark_as_pydevd_daemon_thread
 from _pydevd_bundle.pydevd_process_net_command_json import PyDevJsonCommandProcessor
 from _pydevd_bundle.pydevd_process_net_command import process_net_command
 from _pydevd_bundle.pydevd_net_command import NetCommand
@@ -76,11 +78,13 @@ from _pydevd_bundle.pydevd_collect_bytecode_info import collect_try_except_info,
 from _pydevd_bundle.pydevd_suspended_frames import SuspendedFramesManager
 from socket import SHUT_RDWR
 from _pydevd_bundle.pydevd_api import PyDevdAPI
+from _pydevd_bundle.pydevd_timeout import TimeoutTracker
+from _pydevd_bundle.pydevd_thread_lifecycle import suspend_all_threads, mark_thread_suspended
 
 if USE_CUSTOM_SYS_CURRENT_FRAMES_MAP:
-    from _pydevd_bundle.pydevd_additional_thread_info_regular import _tid_to_last_frame
+    from _pydevd_bundle.pydevd_constants import constructed_tid_to_last_frame
 
-__version_info__ = (1, 9, 0)
+__version_info__ = (2, 2, 0)
 __version_info_str__ = []
 for v in __version_info__:
     __version_info_str__.append(str(v))
@@ -143,12 +147,15 @@ try:
 except:
     pass
 
-bufferStdOutToServer = False
-bufferStdErrToServer = False
+_global_redirect_stdout_to_server = False
+_global_redirect_stderr_to_server = False
 
 file_system_encoding = getfilesystemencoding()
 
 _CACHE_FILE_TYPE = {}
+
+pydev_log.debug('Using GEVENT_SUPPORT: %s', pydevd_constants.SUPPORT_GEVENT)
+pydev_log.debug('pydevd __file__: %s', os.path.abspath(__file__))
 
 
 #=======================================================================================================================
@@ -306,19 +313,23 @@ class AbstractSingleNotificationBehavior(object):
             self._pause_requested = True
             global_suspend_time = self._suspend_time_request
         py_db = self._py_db()
-        run_as_pydevd_daemon_thread(py_db, self._notify_after_timeout, global_suspend_time)
+        if py_db is not None:
+            py_db.timeout_tracker.call_on_timeout(
+                self.NOTIFY_OF_PAUSE_TIMEOUT,
+                self._notify_after_timeout,
+                kwargs={'global_suspend_time': global_suspend_time}
+            )
 
     def _notify_after_timeout(self, global_suspend_time):
-        time.sleep(self.NOTIFY_OF_PAUSE_TIMEOUT)
         with self._lock:
             if self._suspended_thread_ids:
                 if global_suspend_time > self._last_suspend_notification_time:
                     self._last_suspend_notification_time = global_suspend_time
                     # Notify about any thread which is currently suspended.
+                    pydev_log.info('Sending suspend notification after timeout.')
                     self.send_suspend_notification(next(iter(self._suspended_thread_ids)), CMD_THREAD_SUSPEND)
 
-    @contextmanager
-    def notify_thread_suspended(self, thread_id, stop_reason):
+    def on_thread_suspend(self, thread_id, stop_reason):
         with self._lock:
             pause_requested = self._pause_requested
             if pause_requested:
@@ -331,17 +342,42 @@ class AbstractSingleNotificationBehavior(object):
             # issue for a CMD_THREAD_SUSPEND if a pause is pending.
             if stop_reason != CMD_THREAD_SUSPEND or pause_requested:
                 if self._suspend_time_request > self._last_suspend_notification_time:
+                    pydev_log.info('Sending suspend notification.')
                     self._last_suspend_notification_time = self._suspend_time_request
                     self.send_suspend_notification(thread_id, stop_reason)
+                else:
+                    pydev_log.info(
+                        'Suspend not sent (it was already sent). Last suspend % <= Last resume %s',
+                        self._last_suspend_notification_time,
+                        self._last_resume_notification_time,
+                    )
+            else:
+                pydev_log.info(
+                    'Suspend not sent because stop reason is thread suspend and pause was not requested.',
+                )
+
+    def on_thread_resume(self, thread_id):
+        # on resume (step, continue all):
+        with self._lock:
+            self._suspended_thread_ids.remove(thread_id)
+            if self._last_resume_notification_time < self._last_suspend_notification_time:
+                pydev_log.info('Sending resume notification.')
+                self._last_resume_notification_time = self._last_suspend_notification_time
+                self.send_resume_notification(thread_id)
+            else:
+                pydev_log.info(
+                    'Resume not sent (it was already sent). Last resume %s >= Last suspend %s',
+                    self._last_resume_notification_time,
+                    self._last_suspend_notification_time,
+                )
+
+    @contextmanager
+    def notify_thread_suspended(self, thread_id, stop_reason):
+        self.on_thread_suspend(thread_id, stop_reason)
         try:
             yield  # At this point the thread must be actually suspended.
         finally:
-            # on resume (step, continue all):
-            with self._lock:
-                self._suspended_thread_ids.remove(thread_id)
-                if self._last_resume_notification_time < self._last_suspend_notification_time:
-                    self._last_resume_notification_time = self._last_suspend_notification_time
-                    self.send_resume_notification(thread_id)
+            self.on_thread_resume(thread_id)
 
 
 class ThreadsSuspendedSingleNotification(AbstractSingleNotificationBehavior):
@@ -464,7 +500,12 @@ class PyDB(object):
         self._cmd_queue = defaultdict(_queue.Queue)  # Key is thread id or '*', value is Queue
         self.suspended_frames_manager = SuspendedFramesManager()
         self._files_filtering = FilesFiltering()
-        self.source_mapping = SourceMapping()
+        self.timeout_tracker = TimeoutTracker(self)
+
+        # Note: when the source mapping is changed we also have to clear the file types cache
+        # (because if a given file is a part of the project or not may depend on it being
+        # defined in the source mapping).
+        self.source_mapping = SourceMapping(on_source_mapping_changed=self._clear_filters_caches)
 
         # Determines whether we should terminate child processes when asked to terminate.
         self.terminate_child_processes = True
@@ -479,6 +520,8 @@ class PyDB(object):
         # Set communication protocol
         PyDevdAPI().set_protocol(self, 0, PydevdCustomization.DEFAULT_PROTOCOL)
 
+        self.variable_presentation = PyDevdAPI.VariablePresentation()
+
         # mtime to be raised when breakpoints change
         self.mtime = 0
 
@@ -489,6 +532,7 @@ class PyDB(object):
         # and later it should be assigned back (to prevent concurrency issues).
         self.break_on_uncaught_exceptions = {}
         self.break_on_caught_exceptions = {}
+        self.break_on_user_uncaught_exceptions = {}
 
         self.ready_to_run = False
         self._main_lock = thread.allocate_lock()
@@ -603,6 +647,7 @@ class PyDB(object):
         self.collect_return_info = collect_return_info
         self.get_exception_breakpoint = get_exception_breakpoint
         self._dont_trace_get_file_type = DONT_TRACE.get
+        self._dont_trace_dirs_get_file_type = DONT_TRACE_DIRS.get
         self.PYDEV_FILE = PYDEV_FILE
         self.LIB_FILE = LIB_FILE
 
@@ -620,6 +665,16 @@ class PyDB(object):
 
         # Stop the tracing as the last thing before the actual shutdown for a clean exit.
         atexit.register(stoptrace)
+
+    def get_arg_ppid(self):
+        try:
+            setup = SetupHolder.setup
+            if setup:
+                return int(setup.get('ppid', 0))
+        except:
+            pydev_log.exception('Error getting ppid.')
+
+        return 0
 
     def wait_for_ready_to_run(self):
         while not self.ready_to_run:
@@ -731,14 +786,32 @@ class PyDB(object):
 
     def _internal_get_file_type(self, abs_real_path_and_basename):
         basename = abs_real_path_and_basename[-1]
-        if basename.startswith('<frozen '):
-            # In Python 3.7 "<frozen ..." appears multiple times during import and should be
-            # ignored for the user.
+        if (
+                basename.startswith(IGNORE_BASENAMES_STARTING_WITH) or
+                abs_real_path_and_basename[0].startswith(IGNORE_BASENAMES_STARTING_WITH)
+            ):
+            # Note: these are the files that are completely ignored (they aren't shown to the user
+            # as user nor library code as it's usually just noise in the frame stack).
             return self.PYDEV_FILE
-        if abs_real_path_and_basename[0].startswith(('<builtin', '<attrs')):
-            # In PyPy "<builtin> ..." can appear and should be ignored for the user.
-            return self.PYDEV_FILE
-        return self._dont_trace_get_file_type(basename)
+        file_type = self._dont_trace_get_file_type(basename)
+        if file_type is not None:
+            return file_type
+
+        if basename.startswith('__init__.py'):
+            # i.e.: ignore the __init__ files inside pydevd (the other
+            # files are ignored just by their name).
+            abs_path = abs_real_path_and_basename[0]
+            i = max(abs_path.rfind('/'), abs_path.rfind('\\'))
+            if i:
+                abs_path = abs_path[0:i]
+                i = max(abs_path.rfind('/'), abs_path.rfind('\\'))
+                if i:
+                    dirname = abs_path[i + 1:]
+                    # At this point, something as:
+                    # "my_path\_pydev_runfiles\__init__.py"
+                    # is now  "_pydev_runfiles".
+                    return self._dont_trace_dirs_get_file_type(dirname)
+        return None
 
     def dont_trace_external_files(self, abs_path):
         '''
@@ -802,7 +875,7 @@ class PyDB(object):
                 f = frame.f_back
                 while f is not None:
                     if (self.get_file_type(f) != self.PYDEV_FILE and
-                            get_abs_path_real_path_and_base_from_file(f.f_code.co_filename)[2] not in ('runpy.py', '<string>')):
+                            pydevd_file_utils.basename(f.f_code.co_filename) not in ('runpy.py', '<string>')):
                         # We found some back frame that's not internal, which means we must consider
                         # this a library file.
                         # This is done because we only want to trace files as <string> if they don't
@@ -825,6 +898,7 @@ class PyDB(object):
             if file_type is None:
                 if self.dont_trace_external_files(abs_real_path_and_basename[0]):
                     file_type = PYDEV_FILE
+
             _cache_file_type[cache_key] = file_type
             return file_type
 
@@ -950,7 +1024,7 @@ class PyDB(object):
             self.plugin = PluginManager(self)
         return self.plugin
 
-    def in_project_scope(self, frame, filename=None):
+    def in_project_scope(self, frame, absolute_filename=None):
         '''
         Note: in general this method should not be used (apply_files_filter should be used
         in most cases as it also handles the project scope check).
@@ -958,22 +1032,22 @@ class PyDB(object):
         :param frame:
             The frame we want to check.
 
-        :param filename:
+        :param absolute_filename:
             Must be the result from get_abs_path_real_path_and_base_from_frame(frame)[0] (can
             be used to speed this function a bit if it's already available to the caller, but
             in general it's not needed).
         '''
         try:
-            if filename is None:
+            if absolute_filename is None:
                 try:
                     # Make fast path faster!
                     abs_real_path_and_basename = NORM_PATHS_AND_BASE_CONTAINER[frame.f_code.co_filename]
                 except:
                     abs_real_path_and_basename = get_abs_path_real_path_and_base_from_frame(frame)
 
-                filename = abs_real_path_and_basename[0]
+                absolute_filename = abs_real_path_and_basename[0]
 
-            cache_key = (frame.f_code.co_firstlineno, filename, frame.f_code)
+            cache_key = (frame.f_code.co_firstlineno, absolute_filename, frame.f_code)
 
             return self._in_project_scope_cache[cache_key]
         except KeyError:
@@ -988,14 +1062,18 @@ class PyDB(object):
             if file_type == self.PYDEV_FILE:
                 cache[cache_key] = False
 
-            elif file_type == self.LIB_FILE and filename == '<string>':
-                # This means it's a <string> which should be considered to be a library file and
-                # shouldn't be considered as a part of the project.
-                # (i.e.: lib files must be traced if they're put inside a project).
-                cache[cache_key] = False
+            elif absolute_filename == '<string>':
+                # Special handling for '<string>'
+                if file_type == self.LIB_FILE:
+                    cache[cache_key] = False
+                else:
+                    cache[cache_key] = True
+
+            elif self.source_mapping.has_mapping_entry(absolute_filename):
+                cache[cache_key] = True
 
             else:
-                cache[cache_key] = self._files_filtering.in_project_roots(filename)
+                cache[cache_key] = self._files_filtering.in_project_roots(absolute_filename)
 
             return cache[cache_key]
 
@@ -1016,15 +1094,14 @@ class PyDB(object):
         self._clear_filters_caches()
         self._clear_skip_caches()
 
-    def _exclude_by_filter(self, frame, filename):
+    def _exclude_by_filter(self, frame, absolute_filename):
         '''
-        :param str filename:
-            The filename to filter.
-
         :return: True if it should be excluded, False if it should be included and None
             if no rule matched the given file.
+
+        :note: it'll be normalized as needed inside of this method.
         '''
-        cache_key = (filename, frame.f_code.co_name)
+        cache_key = (absolute_filename, frame.f_code.co_name, frame.f_code.co_firstlineno)
         try:
             return self._exclude_by_filter_cache[cache_key]
         except KeyError:
@@ -1037,16 +1114,19 @@ class PyDB(object):
                 module_name = None
                 if self._files_filtering.require_module:
                     module_name = frame.f_globals.get('__name__', '')
-                cache[cache_key] = self._files_filtering.exclude_by_filter(filename, module_name)
+                cache[cache_key] = self._files_filtering.exclude_by_filter(absolute_filename, module_name)
 
             return cache[cache_key]
 
-    def apply_files_filter(self, frame, filename, force_check_project_scope):
+    def apply_files_filter(self, frame, original_filename, force_check_project_scope):
         '''
-        Should only be called if `self.is_files_filter_enabled == True`.
+        Should only be called if `self.is_files_filter_enabled == True` or `force_check_project_scope == True`.
 
         Note that it covers both the filter by specific paths includes/excludes as well
         as the check which filters out libraries if not in the project scope.
+
+        :param original_filename:
+            Note can either be the original filename or the absolute version of that filename.
 
         :param force_check_project_scope:
             Check that the file is in the project scope even if the global setting
@@ -1056,28 +1136,29 @@ class PyDB(object):
             True if it should be excluded when stepping and False if it should be
             included.
         '''
-        cache_key = (frame.f_code.co_firstlineno, filename, force_check_project_scope, frame.f_code)
+        cache_key = (frame.f_code.co_firstlineno, original_filename, force_check_project_scope, frame.f_code)
         try:
             return self._apply_filter_cache[cache_key]
         except KeyError:
             if self.plugin is not None and (self.has_plugin_line_breaks or self.has_plugin_exception_breaks):
                 # If it's explicitly needed by some plugin, we can't skip it.
                 if not self.plugin.can_skip(self, frame):
-                    pydev_log.debug_once('File traced (included by plugins): %s', filename)
+                    pydev_log.debug_once('File traced (included by plugins): %s', original_filename)
                     self._apply_filter_cache[cache_key] = False
                     return False
 
             if self._exclude_filters_enabled:
-                exclude_by_filter = self._exclude_by_filter(frame, filename)
+                absolute_filename = pydevd_file_utils.absolute_path(original_filename)
+                exclude_by_filter = self._exclude_by_filter(frame, absolute_filename)
                 if exclude_by_filter is not None:
                     if exclude_by_filter:
                         # ignore files matching stepping filters
-                        pydev_log.debug_once('File not traced (excluded by filters): %s', filename)
+                        pydev_log.debug_once('File not traced (excluded by filters): %s', original_filename)
 
                         self._apply_filter_cache[cache_key] = True
                         return True
                     else:
-                        pydev_log.debug_once('File traced (explicitly included by filters): %s', filename)
+                        pydev_log.debug_once('File traced (explicitly included by filters): %s', original_filename)
 
                         self._apply_filter_cache[cache_key] = False
                         return False
@@ -1086,16 +1167,16 @@ class PyDB(object):
                 # ignore library files while stepping
                 self._apply_filter_cache[cache_key] = True
                 if force_check_project_scope:
-                    pydev_log.debug_once('File not traced (not in project): %s', filename)
+                    pydev_log.debug_once('File not traced (not in project): %s', original_filename)
                 else:
-                    pydev_log.debug_once('File not traced (not in project - force_check_project_scope): %s', filename)
+                    pydev_log.debug_once('File not traced (not in project - force_check_project_scope): %s', original_filename)
 
                 return True
 
             if force_check_project_scope:
-                pydev_log.debug_once('File traced: %s (force_check_project_scope)', filename)
+                pydev_log.debug_once('File traced: %s (force_check_project_scope)', original_filename)
             else:
-                pydev_log.debug_once('File traced: %s', filename)
+                pydev_log.debug_once('File traced: %s', original_filename)
             self._apply_filter_cache[cache_key] = False
             return False
 
@@ -1110,7 +1191,9 @@ class PyDB(object):
         exclude_filters_enabled = self._exclude_filters_enabled
 
         if (ignore_libraries and not self.in_project_scope(trace.tb_frame)) \
-                or (exclude_filters_enabled and self._exclude_by_filter(trace.tb_frame, trace.tb_frame.f_code.co_filename)):
+                or (exclude_filters_enabled and self._exclude_by_filter(
+                    trace.tb_frame,
+                    pydevd_file_utils.absolute_path(trace.tb_frame.f_code.co_filename))):
             return True
 
         return False
@@ -1277,26 +1360,26 @@ class PyDB(object):
         queue.put(int_cmd)
 
     def enable_output_redirection(self, redirect_stdout, redirect_stderr):
-        global bufferStdOutToServer
-        global bufferStdErrToServer
+        global _global_redirect_stdout_to_server
+        global _global_redirect_stderr_to_server
 
-        bufferStdOutToServer = redirect_stdout
-        bufferStdErrToServer = redirect_stderr
+        _global_redirect_stdout_to_server = redirect_stdout
+        _global_redirect_stderr_to_server = redirect_stderr
         self.redirect_output = redirect_stdout or redirect_stderr
-        if bufferStdOutToServer:
-            init_stdout_redirect()
-        if bufferStdErrToServer:
-            init_stderr_redirect()
+        if _global_redirect_stdout_to_server:
+            _init_stdout_redirect()
+        if _global_redirect_stderr_to_server:
+            _init_stderr_redirect()
 
     def check_output_redirect(self):
-        global bufferStdOutToServer
-        global bufferStdErrToServer
+        global _global_redirect_stdout_to_server
+        global _global_redirect_stderr_to_server
 
-        if bufferStdOutToServer:
-            init_stdout_redirect()
+        if _global_redirect_stdout_to_server:
+            _init_stdout_redirect()
 
-        if bufferStdErrToServer:
-            init_stderr_redirect()
+        if _global_redirect_stderr_to_server:
+            _init_stderr_redirect()
 
     def init_matplotlib_in_debug_console(self):
         # import hook and patches for matplotlib support in debug console
@@ -1454,6 +1537,8 @@ class PyDB(object):
                     for thread_id in program_threads_dead:
                         self.notify_thread_not_alive(thread_id, use_lock=False)
 
+            cmds_to_execute = []
+
             # Without self._lock_running_thread_ids
             if len(program_threads_alive) == 0 and ready_to_run:
                 dispose = True
@@ -1488,26 +1573,34 @@ class PyDB(object):
                                 self.mpl_hooks_in_debug_console = True
 
                             if int_cmd.can_be_executed_by(curr_thread_id):
-                                pydev_log.verbose("processing internal command ", int_cmd)
-                                int_cmd.do_it(self)
+                                cmds_to_execute.append(int_cmd)
                             else:
-                                pydev_log.verbose("NOT processing internal command ", int_cmd)
+                                pydev_log.verbose("NOT processing internal command: %s ", int_cmd)
                                 cmds_to_add_back.append(int_cmd)
 
                     except _queue.Empty:  # @UndefinedVariable
                         # this is how we exit
                         for int_cmd in cmds_to_add_back:
                             queue.put(int_cmd)
+
         if dispose:
             # Note: must be called without the main lock to avoid deadlocks.
             self.dispose_and_kill_all_pydevd_threads()
+        else:
+            # Actually execute the commands without the main lock!
+            for int_cmd in cmds_to_execute:
+                pydev_log.verbose("processing internal command: %s", int_cmd)
+                try:
+                    int_cmd.do_it(self)
+                except:
+                    pydev_log.exception('Error processing internal command.')
 
-    def consolidate_breakpoints(self, file, id_to_breakpoint, breakpoints):
+    def consolidate_breakpoints(self, canonical_normalized_filename, id_to_breakpoint, breakpoints):
         break_dict = {}
         for _breakpoint_id, pybreakpoint in dict_iter_items(id_to_breakpoint):
             break_dict[pybreakpoint.line] = pybreakpoint
 
-        breakpoints[file] = break_dict
+        breakpoints[canonical_normalized_filename] = break_dict
         self._clear_skip_caches()
 
     def _clear_skip_caches(self):
@@ -1521,6 +1614,7 @@ class PyDB(object):
         expression,
         notify_on_handled_exceptions,
         notify_on_unhandled_exceptions,
+        notify_on_user_unhandled_exceptions,
         notify_on_first_raise_only,
         ignore_libraries=False
         ):
@@ -1531,6 +1625,7 @@ class PyDB(object):
                 expression,
                 notify_on_handled_exceptions,
                 notify_on_unhandled_exceptions,
+                notify_on_user_unhandled_exceptions,
                 notify_on_first_raise_only,
                 ignore_libraries
             )
@@ -1552,27 +1647,14 @@ class PyDB(object):
                 pydev_log.critical("Exceptions to hook always: %s.", cp)
             self.break_on_caught_exceptions = cp
 
+        if eb.notify_on_user_unhandled_exceptions:
+            cp = self.break_on_user_uncaught_exceptions.copy()
+            cp[exception] = eb
+            if DebugInfoHolder.DEBUG_TRACE_BREAKPOINTS > 0:
+                pydev_log.critical("Exceptions to hook on user uncaught code: %s.", cp)
+            self.break_on_user_uncaught_exceptions = cp
+
         return eb
-
-    def _mark_suspend(self, thread, stop_reason, original_step_cmd=-1):
-        info = set_additional_thread_info(thread)
-        info.suspend_type = PYTHON_SUSPEND
-        if original_step_cmd != -1:
-            stop_reason = original_step_cmd
-        thread.stop_reason = stop_reason
-
-        # Note: don't set the 'pydev_original_step_cmd' here if unset.
-
-        if info.pydev_step_cmd == -1:
-            # If the step command is not specified, set it to step into
-            # to make sure it'll break as soon as possible.
-            info.pydev_step_cmd = CMD_STEP_INTO
-            info.pydev_step_stop = None
-
-        # Mark as suspend as the last thing.
-        info.pydev_state = STATE_SUSPEND
-
-        return info
 
     def set_suspend(self, thread, stop_reason, suspend_other_threads=False, is_pause=False, original_step_cmd=-1):
         '''
@@ -1597,7 +1679,7 @@ class PyDB(object):
         if is_pause:
             self._threads_suspended_single_notification.on_pause()
 
-        info = self._mark_suspend(thread, stop_reason, original_step_cmd=original_step_cmd)
+        info = mark_thread_suspended(thread, stop_reason, original_step_cmd=original_step_cmd)
 
         if is_pause:
             # Must set tracing after setting the state to suspend.
@@ -1620,23 +1702,8 @@ class PyDB(object):
             suspend_other_threads = True
 
         if suspend_other_threads:
-            # Suspend all other threads.
-            all_threads = pydevd_utils.get_non_pydevd_threads()
-            for t in all_threads:
-                if getattr(t, 'pydev_do_not_trace', None):
-                    pass  # skip some other threads, i.e. ipython history saving thread from debug console
-                else:
-                    if t is thread:
-                        continue
-                    info = self._mark_suspend(t, CMD_THREAD_SUSPEND)
-                    frame = info.get_topmost_frame(t)
-
-                    # Reset the time as in this case this was not the main thread suspended.
-                    if frame is not None:
-                        try:
-                            self.set_trace_for_frame_and_parents(frame)
-                        finally:
-                            frame = None
+            # Suspend all except the current one (which we're currently suspending already).
+            suspend_all_threads(self, except_thread=thread)
 
     def _send_breakpoint_condition_exception(self, thread, conditional_breakpoint_exception_tuple):
         """If conditional breakpoint raises an exception during evaluation
@@ -1713,17 +1780,16 @@ class PyDB(object):
         """ returns a frame on the thread that has a given frame_id """
         return self.suspended_frames_manager.find_frame(thread_id, frame_id)
 
-    def do_wait_suspend(self, thread, frame, event, arg, is_unhandled_exception=False):  # @UnusedVariable
+    def do_wait_suspend(self, thread, frame, event, arg, exception_type=None):  # @UnusedVariable
         """ busy waits until the thread state changes to RUN
         it expects thread's state as attributes of the thread.
         Upon running, processes any outstanding Stepping commands.
 
-        :param is_unhandled_exception:
-            If True we should use the line of the exception instead of the current line in the frame
-            as the paused location on the top-level frame (exception info must be passed on 'arg').
+        :param exception_type:
+            If pausing due to an exception, its type.
         """
         if USE_CUSTOM_SYS_CURRENT_FRAMES_MAP:
-            _tid_to_last_frame[thread.ident] = sys._getframe()
+            constructed_tid_to_last_frame[thread.ident] = sys._getframe()
         self.process_internal_commands()
 
         thread_id = get_current_thread_id(thread)
@@ -1742,10 +1808,27 @@ class PyDB(object):
             # arg must be the exception info (tuple(exc_type, exc, traceback))
             exc_type, exc_desc, trace_obj = arg
             if trace_obj is not None:
-                frames_list = pydevd_frame_utils.create_frames_list_from_traceback(trace_obj, frame, exc_type, exc_desc)
+                frames_list = pydevd_frame_utils.create_frames_list_from_traceback(trace_obj, frame, exc_type, exc_desc, exception_type=exception_type)
 
         if frames_list is None:
             frames_list = pydevd_frame_utils.create_frames_list_from_frame(frame)
+
+        if DebugInfoHolder.DEBUG_TRACE_LEVEL > 2:
+            pydev_log.debug(
+                'PyDB.do_wait_suspend\nname: %s (line: %s)\n file: %s\n event: %s\n arg: %s\n step: %s (original step: %s)\n thread: %s, thread id: %s, id(thread): %s',
+                frame.f_code.co_name,
+                frame.f_lineno,
+                frame.f_code.co_filename,
+                event,
+                arg,
+                constant_to_str(thread.additional_info.pydev_step_cmd),
+                constant_to_str(thread.additional_info.pydev_original_step_cmd),
+                thread,
+                thread_id,
+                id(thread),
+            )
+            for f in frames_list:
+                pydev_log.debug('  Stack: %s, %s, %s', f.f_code.co_filename, f.f_code.co_name, f.f_lineno)
 
         with self.suspended_frames_manager.track_frames(self) as frames_tracker:
             frames_tracker.track(thread_id, frames_list)
@@ -1776,10 +1859,13 @@ class PyDB(object):
         if keep_suspended:
             # This means that we should pause again after a set next statement.
             self._threads_suspended_single_notification.increment_suspend_time()
-            self.do_wait_suspend(thread, frame, event, arg, is_unhandled_exception)
+            self.do_wait_suspend(thread, frame, event, arg, exception_type)
+        if DebugInfoHolder.DEBUG_TRACE_LEVEL > 2:
+            pydev_log.debug('Leaving PyDB.do_wait_suspend: %s (%s) %s', thread, thread_id, id(thread))
 
     def _do_wait_suspend(self, thread, frame, event, arg, suspend_type, from_this_thread, frames_tracker):
         info = thread.additional_info
+        info.step_in_initial_location = None
         keep_suspended = False
 
         with self._main_lock:  # Use lock to check if suspended state changed
@@ -1807,6 +1893,7 @@ class PyDB(object):
 
         # process any stepping instructions
         if info.pydev_step_cmd in (CMD_STEP_INTO, CMD_STEP_INTO_MY_CODE):
+            info.step_in_initial_location = (frame, frame.f_lineno)
             if frame.f_code.co_flags & 0x80:  # CO_COROUTINE = 0x80
                 # When in a coroutine we switch to CMD_STEP_INTO_COROUTINE.
                 info.pydev_step_cmd = CMD_STEP_INTO_COROUTINE
@@ -1903,8 +1990,12 @@ class PyDB(object):
         pydev_log.debug("We are stopping in unhandled exception.")
         try:
             add_exception_to_frame(frame, arg)
-            self.set_suspend(thread, CMD_ADD_EXCEPTION_BREAK)
-            self.do_wait_suspend(thread, frame, 'exception', arg, is_unhandled_exception=True)
+            self.send_caught_exception_stack(thread, arg, id(frame))
+            try:
+                self.set_suspend(thread, CMD_ADD_EXCEPTION_BREAK)
+                self.do_wait_suspend(thread, frame, 'exception', arg, EXCEPTION_TYPE_UNHANDLED)
+            except:
+                self.send_caught_exception_stack_proceeded(thread)
         except:
             pydev_log.exception("We've got an error while stopping in unhandled exception: %s.", arg[0])
         finally:
@@ -2154,7 +2245,7 @@ class PyDB(object):
             # sys.path.insert(0, os.getcwd())
             # Changed: it's not the local directory, but the directory of the file launched
             # The file being run must be in the pythonpath (even if it was not before)
-            sys.path.insert(0, os.path.split(rPath(file))[0])
+            sys.path.insert(0, os.path.split(os_path_abspath(file))[0])
 
         if set_trace:
             self.wait_for_ready_to_run()
@@ -2312,6 +2403,42 @@ def enable_qt_support(qt_support_mode):
     pydev_monkey_qt.patch_qt(qt_support_mode)
 
 
+def start_dump_threads_thread(filename_template, timeout, recurrent):
+    '''
+    Helper to dump threads after a timeout.
+
+    :param filename_template:
+        A template filename, such as 'c:/temp/thread_dump_%s.txt', where the %s will
+        be replaced by the time for the dump.
+    :param timeout:
+        The timeout (in seconds) for the dump.
+    :param recurrent:
+        If True we'll keep on doing thread dumps.
+    '''
+    assert filename_template.count('%s') == 1, \
+        'Expected one %%s to appear in: %s' % (filename_template,)
+
+    def _threads_on_timeout():
+        try:
+            while True:
+                time.sleep(timeout)
+                filename = filename_template % (time.time(),)
+                try:
+                    os.makedirs(os.path.dirname(filename))
+                except Exception:
+                    pass
+                with open(filename, 'w') as stream:
+                    dump_threads(stream)
+                if not recurrent:
+                    return
+        except Exception:
+            pydev_log.exception()
+
+    t = threading.Thread(target=_threads_on_timeout)
+    mark_as_pydevd_daemon_thread(t)
+    t.start()
+
+
 def dump_threads(stream=None):
     '''
     Helper to dump thread info (default is printing to stderr).
@@ -2326,81 +2453,12 @@ def usage(doExit=0):
         sys.exit(0)
 
 
-class _CustomWriter(object):
-
-    def __init__(self, out_ctx, wrap_stream, wrap_buffer, on_write=None):
-        '''
-        :param out_ctx:
-            1=stdout and 2=stderr
-
-        :param wrap_stream:
-            Either sys.stdout or sys.stderr.
-
-        :param bool wrap_buffer:
-            If True the buffer attribute (which wraps writing bytes) should be
-            wrapped.
-
-        :param callable(str) on_write:
-            May be a custom callable to be called when to write something.
-            If not passed the default implementation will create an io message
-            and send it through the debugger.
-        '''
-        encoding = getattr(wrap_stream, 'encoding', None)
-        if not encoding:
-            encoding = os.environ.get('PYTHONIOENCODING', 'utf-8')
-        self.encoding = encoding
-        self._out_ctx = out_ctx
-        if wrap_buffer:
-            self.buffer = _CustomWriter(out_ctx, wrap_stream, wrap_buffer=False, on_write=on_write)
-        self._on_write = on_write
-
-    def flush(self):
-        pass  # no-op here
-
-    def write(self, s):
-        if self._on_write is not None:
-            self._on_write(s)
-            return
-
-        if s:
-            if IS_PY2:
-                # Need s in utf-8 bytes
-                if isinstance(s, unicode):  # noqa
-                    # Note: python 2.6 does not accept the "errors" keyword.
-                    s = s.encode('utf-8', 'replace')
-                else:
-                    s = s.decode(self.encoding, 'replace').encode('utf-8', 'replace')
-
-            else:
-                # Need s in str
-                if isinstance(s, bytes):
-                    s = s.decode(self.encoding, errors='replace')
-
-            py_db = get_global_debugger()
-            if py_db is not None:
-                # Note that the actual message contents will be a xml with utf-8, although
-                # the entry is str on py3 and bytes on py2.
-                cmd = py_db.cmd_factory.make_io_message(s, self._out_ctx)
-                if py_db.writer is not None:
-                    py_db.writer.add_command(cmd)
+def _init_stdout_redirect():
+    pydevd_io.redirect_stream_to_pydb_io_messages(std='stdout')
 
 
-def init_stdout_redirect(on_write=None):
-    if not hasattr(sys, '_pydevd_out_buffer_'):
-        wrap_buffer = True if not IS_PY2 else False
-        original = sys.stdout
-        sys._pydevd_out_buffer_ = _CustomWriter(1, original, wrap_buffer, on_write)
-        sys.stdout_original = original
-        sys.stdout = pydevd_io.IORedirector(original, sys._pydevd_out_buffer_, wrap_buffer)  # @UndefinedVariable
-
-
-def init_stderr_redirect(on_write=None):
-    if not hasattr(sys, '_pydevd_err_buffer_'):
-        wrap_buffer = True if not IS_PY2 else False
-        original = sys.stderr
-        sys._pydevd_err_buffer_ = _CustomWriter(2, original, wrap_buffer, on_write)
-        sys.stderr_original = original
-        sys.stderr = pydevd_io.IORedirector(original, sys._pydevd_err_buffer_, wrap_buffer)  # @UndefinedVariable
+def _init_stderr_redirect():
+    pydevd_io.redirect_stream_to_pydb_io_messages(std='stderr')
 
 
 def _enable_attach(
@@ -2472,8 +2530,8 @@ def _is_attached():
 #=======================================================================================================================
 def settrace(
     host=None,
-    stdoutToServer=False,
-    stderrToServer=False,
+    stdout_to_server=False,
+    stderr_to_server=False,
     port=5678,
     suspend=True,
     trace_only_current_thread=False,
@@ -2486,15 +2544,17 @@ def settrace(
     dont_trace_end_patterns=(),
     access_token=None,
     client_access_token=None,
+    notify_stdin=True,
+    **kwargs
     ):
     '''Sets the tracing function with the pydev debug function and initializes needed facilities.
 
     :param host: the user may specify another host, if the debug server is not in the same machine (default is the local
         host)
 
-    :param stdoutToServer: when this is true, the stdout is passed to the debug server
+    :param stdout_to_server: when this is true, the stdout is passed to the debug server
 
-    :param stderrToServer: when this is true, the stderr is passed to the debug server
+    :param stderr_to_server: when this is true, the stderr is passed to the debug server
         so that they are printed in its console and not in this process console.
 
     :param port: specifies which port to use for communicating with the server (note that the server must be started
@@ -2531,12 +2591,27 @@ def settrace(
 
     :param client_access_token: token to be sent from the debugger to the client (i.e.: IDE) when
         a connection is established (verified by the client).
+
+    :param notify_stdin:
+        If True sys.stdin will be patched to notify the client when a message is requested
+        from the IDE. This is done so that when reading the stdin the client is notified.
+        Clients may need this to know when something that is being written should be interpreted
+        as an input to the process or as a command to be evaluated.
+        Note that parallel-python has issues with this (because it tries to assert that sys.stdin
+        is of a given type instead of just checking that it has what it needs).
     '''
+
+    stdout_to_server = stdout_to_server or kwargs.get('stdoutToServer', False)  # Backward compatibility
+    stderr_to_server = stderr_to_server or kwargs.get('stderrToServer', False)  # Backward compatibility
+
+    # Internal use (may be used to set the setup info directly for subprocesess).
+    __setup_holder__ = kwargs.get('__setup_holder__')
+
     with _set_trace_lock:
         _locked_settrace(
             host,
-            stdoutToServer,
-            stderrToServer,
+            stdout_to_server,
+            stderr_to_server,
             port,
             suspend,
             trace_only_current_thread,
@@ -2548,6 +2623,8 @@ def settrace(
             dont_trace_end_patterns,
             access_token,
             client_access_token,
+            __setup_holder__=__setup_holder__,
+            notify_stdin=notify_stdin,
         )
 
 
@@ -2556,8 +2633,8 @@ _set_trace_lock = ForkSafeLock()
 
 def _locked_settrace(
     host,
-    stdoutToServer,
-    stderrToServer,
+    stdout_to_server,
+    stderr_to_server,
     port,
     suspend,
     trace_only_current_thread,
@@ -2569,6 +2646,8 @@ def _locked_settrace(
     dont_trace_end_patterns,
     access_token,
     client_access_token,
+    __setup_holder__,
+    notify_stdin,
     ):
     if patch_multiprocessing:
         try:
@@ -2582,10 +2661,12 @@ def _locked_settrace(
         from _pydev_bundle import pydev_localhost
         host = pydev_localhost.get_localhost()
 
-    global bufferStdOutToServer
-    global bufferStdErrToServer
+    global _global_redirect_stdout_to_server
+    global _global_redirect_stderr_to_server
 
     py_db = get_global_debugger()
+    if __setup_holder__:
+        SetupHolder.setup = __setup_holder__
     if py_db is None:
         py_db = PyDB()
         pydevd_vm_type.setup_type()
@@ -2596,6 +2677,7 @@ def _locked_settrace(
                 'server': False,
                 'port': int(port),
                 'multiprocess': patch_multiprocessing,
+                'skip-notify-stdin': not notify_stdin,
             }
             SetupHolder.setup = setup
 
@@ -2616,16 +2698,17 @@ def _locked_settrace(
         if dont_trace_start_patterns or dont_trace_end_patterns:
             PyDevdAPI().set_dont_trace_start_end_patterns(py_db, dont_trace_start_patterns, dont_trace_end_patterns)
 
-        bufferStdOutToServer = stdoutToServer
-        bufferStdErrToServer = stderrToServer
+        _global_redirect_stdout_to_server = stdout_to_server
+        _global_redirect_stderr_to_server = stderr_to_server
 
-        if bufferStdOutToServer:
-            init_stdout_redirect()
+        if _global_redirect_stdout_to_server:
+            _init_stdout_redirect()
 
-        if bufferStdErrToServer:
-            init_stderr_redirect()
+        if _global_redirect_stderr_to_server:
+            _init_stderr_redirect()
 
-        patch_stdin()
+        if notify_stdin:
+            patch_stdin()
 
         t = threadingCurrentThread()
         additional_info = set_additional_thread_info(t)
@@ -2732,7 +2815,7 @@ class Dispatcher(object):
     def close(self):
         try:
             self.reader.do_kill_pydev_thread()
-        except :
+        except:
             pass
 
 
@@ -2743,6 +2826,7 @@ class DispatchReader(ReaderThread):
 
         ReaderThread.__init__(
             self,
+            get_global_debugger(),
             self.dispatcher.client,
             PyDevJsonCommandProcessor=PyDevJsonCommandProcessor,
             process_net_command=process_net_command,
@@ -2809,6 +2893,10 @@ def settrace_forked(setup_tracing=True):
     setup = SetupHolder.setup
     if setup is None:
         setup = {}
+    else:
+        # i.e.: Get the ppid at this point as it just changed.
+        # If we later do an exec() it should remain the same ppid.
+        setup[pydevd_constants.ARGUMENT_PPID] = PyDevdAPI().get_ppid()
     access_token = setup.get('access-token')
     client_access_token = setup.get('client-access-token')
 
@@ -2943,6 +3031,7 @@ def main():
 
     # parse the command line. --file is our last argument that is required
     pydev_log.debug("Initial arguments: %s", (sys.argv,))
+    pydev_log.debug("Current pid: %s", os.getpid())
     try:
         from _pydevd_bundle.pydevd_command_line_handling import process_command_line
         setup = process_command_line(sys.argv)
@@ -3067,7 +3156,8 @@ def main():
             pass
 
     is_module = setup['module']
-    patch_stdin()
+    if not setup['skip-notify-stdin']:
+        patch_stdin()
 
     if setup[pydevd_constants.ARGUMENT_JSON_PROTOCOL]:
         PyDevdAPI().set_protocol(debugger, 0, JSON_PROTOCOL)

@@ -1,17 +1,17 @@
 from contextlib import contextmanager
 import sys
 
-from _pydev_imps._pydev_saved_modules import threading
 from _pydevd_bundle.pydevd_constants import get_frame, dict_items, RETURN_VALUES_DICT, \
-    dict_iter_items, ForkSafeLock
+    dict_iter_items, ForkSafeLock, GENERATED_LEN_ATTR_NAME, silence_warnings_decorator
 from _pydevd_bundle.pydevd_xml import get_variable_details, get_type
 from _pydev_bundle.pydev_override import overrides
-from _pydevd_bundle.pydevd_resolver import sorted_attributes_key, TOO_LARGE_ATTR
+from _pydevd_bundle.pydevd_resolver import sorted_attributes_key, TOO_LARGE_ATTR, get_var_scope
 from _pydevd_bundle.pydevd_safe_repr import SafeRepr
 from _pydev_bundle import pydev_log
 from _pydevd_bundle import pydevd_vars
 from _pydev_bundle.pydev_imports import Exec
 from _pydevd_bundle.pydevd_frame_utils import FramesList
+from _pydevd_bundle.pydevd_utils import ScopeRequest, DAPGrouper
 
 
 class _AbstractVariable(object):
@@ -22,6 +22,10 @@ class _AbstractVariable(object):
     value = None
     evaluate_name = None
 
+    def __init__(self, py_db):
+        assert py_db is not None
+        self.py_db = py_db
+
     def get_name(self):
         return self.name
 
@@ -31,7 +35,7 @@ class _AbstractVariable(object):
     def get_variable_reference(self):
         return id(self.value)
 
-    def get_var_data(self, fmt=None):
+    def get_var_data(self, fmt=None, **safe_repr_custom_attrs):
         '''
         :param dict fmt:
             Format expected by the DAP (keys: 'hex': bool, 'rawString': bool)
@@ -40,6 +44,8 @@ class _AbstractVariable(object):
         if fmt is not None:
             safe_repr.convert_to_hex = fmt.get('hex', False)
             safe_repr.raw_value = fmt.get('rawString', False)
+        for key, val in safe_repr_custom_attrs.items():
+            setattr(safe_repr, key, val)
 
         type_name, _type_qualifier, _is_exception_on_eval, resolver, value = get_variable_details(
             self.value, to_string=safe_repr)
@@ -57,8 +63,14 @@ class _AbstractVariable(object):
             attributes.append('readOnly')
             name = '(return) %s' % (name,)
 
-        elif name in (TOO_LARGE_ATTR, '__len__'):
+        elif name in (TOO_LARGE_ATTR, GENERATED_LEN_ATTR_NAME):
             attributes.append('readOnly')
+
+        try:
+            if self.value.__class__ == DAPGrouper:
+                type_name = ''
+        except:
+            pass  # Ignore errors accessing __class__.
 
         var_data = {
             'name': name,
@@ -79,20 +91,61 @@ class _AbstractVariable(object):
 
         return var_data
 
-    def get_children_variables(self, fmt=None):
+    def get_children_variables(self, fmt=None, scope=None):
         raise NotImplementedError()
 
-    def get_child_variable_named(self, name, fmt=None):
-        for child_var in self.get_children_variables(fmt=fmt):
+    def get_child_variable_named(self, name, fmt=None, scope=None):
+        for child_var in self.get_children_variables(fmt=fmt, scope=scope):
             if child_var.get_name() == name:
                 return child_var
         return None
 
+    def _group_entries(self, lst, handle_return_values):
+        scope_to_grouper = {}
+
+        group_entries = []
+        if isinstance(self.value, DAPGrouper):
+            new_lst = lst
+        else:
+            new_lst = []
+            get_presentation = self.py_db.variable_presentation.get_presentation
+            # Now that we have the contents, group items.
+            for attr_name, attr_value, evaluate_name in lst:
+                scope = get_var_scope(attr_name, attr_value, evaluate_name, handle_return_values)
+
+                entry = (attr_name, attr_value, evaluate_name)
+                if scope:
+                    presentation = get_presentation(scope)
+                    if presentation == 'hide':
+                        continue
+
+                    elif presentation == 'inline':
+                        new_lst.append(entry)
+
+                    else:  # group
+                        if scope not in scope_to_grouper:
+                            grouper = DAPGrouper(scope)
+                            scope_to_grouper[scope] = grouper
+                        else:
+                            grouper = scope_to_grouper[scope]
+
+                        grouper.contents_debug_adapter_protocol.append(entry)
+
+                else:
+                    new_lst.append(entry)
+
+            for scope in DAPGrouper.SCOPES_SORTED:
+                grouper = scope_to_grouper.get(scope)
+                if grouper is not None:
+                    group_entries.append((scope, grouper, None))
+
+        return new_lst, group_entries
+
 
 class _ObjectVariable(_AbstractVariable):
 
-    def __init__(self, name, value, register_variable, is_return_value=False, evaluate_name=None, frame=None):
-        _AbstractVariable.__init__(self)
+    def __init__(self, py_db, name, value, register_variable, is_return_value=False, evaluate_name=None, frame=None):
+        _AbstractVariable.__init__(self, py_db)
         self.frame = frame
         self.name = name
         self.value = value
@@ -101,8 +154,9 @@ class _ObjectVariable(_AbstractVariable):
         self._is_return_value = is_return_value
         self.evaluate_name = evaluate_name
 
+    @silence_warnings_decorator
     @overrides(_AbstractVariable.get_children_variables)
-    def get_children_variables(self, fmt=None):
+    def get_children_variables(self, fmt=None, scope=None):
         _type, _type_name, resolver = get_type(self.value)
 
         children_variables = []
@@ -118,6 +172,9 @@ class _ObjectVariable(_AbstractVariable):
                 # No evaluate name in this case.
                 lst = [(key, value, None) for (key, value) in lst]
 
+            lst, group_entries = self._group_entries(lst, handle_return_values=False)
+            if group_entries:
+                lst = group_entries + lst
             parent_evaluate_name = self.evaluate_name
             if parent_evaluate_name:
                 for key, val, evaluate_name in lst:
@@ -127,12 +184,12 @@ class _ObjectVariable(_AbstractVariable):
                         else:
                             evaluate_name = parent_evaluate_name + evaluate_name
                     variable = _ObjectVariable(
-                        key, val, self._register_variable, evaluate_name=evaluate_name, frame=self.frame)
+                        self.py_db, key, val, self._register_variable, evaluate_name=evaluate_name, frame=self.frame)
                     children_variables.append(variable)
             else:
                 for key, val, evaluate_name in lst:
                     # No evaluate name
-                    variable = _ObjectVariable(key, val, self._register_variable, frame=self.frame)
+                    variable = _ObjectVariable(self.py_db, key, val, self._register_variable, frame=self.frame)
                     children_variables.append(variable)
 
         return children_variables
@@ -160,7 +217,7 @@ class _ObjectVariable(_AbstractVariable):
                 new_key = container_resolver.change_var_from_name(self.value, name, new_value)
                 if new_key is not None:
                     return _ObjectVariable(
-                        new_key, new_value, self._register_variable, evaluate_name=None, frame=self.frame)
+                        self.py_db, new_key, new_value, self._register_variable, evaluate_name=None, frame=self.frame)
 
                 return None
             else:
@@ -185,8 +242,8 @@ def sorted_variables_key(obj):
 
 class _FrameVariable(_AbstractVariable):
 
-    def __init__(self, frame, register_variable):
-        _AbstractVariable.__init__(self)
+    def __init__(self, py_db, frame, register_variable):
+        _AbstractVariable.__init__(self, py_db)
         self.frame = frame
 
         self.name = self.frame.f_code.co_name
@@ -202,22 +259,46 @@ class _FrameVariable(_AbstractVariable):
 
         return self.get_child_variable_named(name, fmt=fmt)
 
+    @silence_warnings_decorator
     @overrides(_AbstractVariable.get_children_variables)
-    def get_children_variables(self, fmt=None):
+    def get_children_variables(self, fmt=None, scope=None):
         children_variables = []
-        for key, val in dict_items(self.frame.f_locals):
+        if scope is not None:
+            assert isinstance(scope, ScopeRequest)
+            scope = scope.scope
+
+        if scope in ('locals', None):
+            dct = self.frame.f_locals
+        elif scope == 'globals':
+            dct = self.frame.f_globals
+        else:
+            raise AssertionError('Unexpected scope: %s' % (scope,))
+
+        lst, group_entries = self._group_entries([(x[0], x[1], None) for x in dict_items(dct) if x[0] != '_pydev_stop_at_break'], handle_return_values=True)
+        group_variables = []
+
+        for key, val, _ in group_entries:
+            # Make sure that the contents in the group are also sorted.
+            val.contents_debug_adapter_protocol.sort(key=lambda v:sorted_attributes_key(v[0]))
+            variable = _ObjectVariable(self.py_db, key, val, self._register_variable, False, key, frame=self.frame)
+            group_variables.append(variable)
+
+        for key, val, _ in lst:
             is_return_value = key == RETURN_VALUES_DICT
             if is_return_value:
                 for return_key, return_value in dict_iter_items(val):
                     variable = _ObjectVariable(
-                        return_key, return_value, self._register_variable, is_return_value, '%s[%r]' % (key, return_key), frame=self.frame)
+                        self.py_db, return_key, return_value, self._register_variable, is_return_value, '%s[%r]' % (key, return_key), frame=self.frame)
                     children_variables.append(variable)
             else:
-                variable = _ObjectVariable(key, val, self._register_variable, is_return_value, key, frame=self.frame)
+                variable = _ObjectVariable(self.py_db, key, val, self._register_variable, is_return_value, key, frame=self.frame)
                 children_variables.append(variable)
 
         # Frame variables always sorted.
         children_variables.sort(key=sorted_variables_key)
+        if group_variables:
+            # Groups have priority over other variables.
+            children_variables = group_variables + children_variables
 
         return children_variables
 
@@ -271,7 +352,7 @@ class _FramesTracker(object):
 
         # Still not created, let's do it now.
         return _ObjectVariable(
-            name, value, self._register_variable, is_return_value=False, evaluate_name=evaluate_name, frame=frame)
+            self.py_db, name, value, self._register_variable, is_return_value=False, evaluate_name=evaluate_name, frame=frame)
 
     def get_main_thread_id(self):
         return self._main_thread_id
@@ -307,7 +388,7 @@ class _FramesTracker(object):
             for frame in frames_list:
                 frame_id = id(frame)
                 self._frame_id_to_frame[frame_id] = frame
-                _FrameVariable(frame, self._register_variable)  # Instancing is enough to register.
+                _FrameVariable(self.py_db, frame, self._register_variable)  # Instancing is enough to register.
                 self._suspended_frames_manager._variable_reference_to_frames_tracker[frame_id] = self
                 frame_ids_from_thread.append(frame_id)
 

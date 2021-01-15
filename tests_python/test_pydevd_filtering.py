@@ -1,6 +1,42 @@
 from _pydevd_bundle.pydevd_constants import IS_WINDOWS
 
 
+def test_in_project_roots_prefix_01(tmpdir):
+    from _pydevd_bundle.pydevd_filtering import FilesFiltering
+    files_filtering = FilesFiltering()
+
+    another = str(tmpdir.join('another'))
+    assert not another.endswith('/') and not another.endswith('\\')
+
+    files_filtering.set_library_roots([another])
+    files_filtering.set_project_roots([])
+    assert not files_filtering.in_project_roots(another + '/f.py')
+    if IS_WINDOWS:
+        assert not files_filtering.in_project_roots(another + '\\f.py')
+    else:
+        assert files_filtering.in_project_roots(another + '\\f.py')
+
+    assert files_filtering.in_project_roots(another + 'f.py')
+
+
+def test_in_project_roots_prefix_02(tmpdir):
+    from _pydevd_bundle.pydevd_filtering import FilesFiltering
+    files_filtering = FilesFiltering()
+
+    another = str(tmpdir.join('another'))
+    assert not another.endswith('/') and not another.endswith('\\')
+
+    files_filtering.set_library_roots([])
+    files_filtering.set_project_roots([another])
+    assert files_filtering.in_project_roots(another + '/f.py')
+    if IS_WINDOWS:
+        assert files_filtering.in_project_roots(another + '\\f.py')
+    else:
+        assert not files_filtering.in_project_roots(another + '\\f.py')
+
+    assert not files_filtering.in_project_roots(another + 'f.py')
+
+
 def test_in_project_roots(tmpdir):
     from _pydevd_bundle.pydevd_filtering import FilesFiltering
     files_filtering = FilesFiltering()
@@ -8,7 +44,7 @@ def test_in_project_roots(tmpdir):
     import os.path
     import sys
     assert files_filtering._get_library_roots() == [
-        os.path.normcase(x) for x in files_filtering._get_default_library_roots()]
+        os.path.normcase(x) + ('\\' if IS_WINDOWS else '/') for x in files_filtering._get_default_library_roots()]
 
     site_packages = tmpdir.mkdir('site-packages')
     project_dir = tmpdir.mkdir('project')
@@ -33,10 +69,31 @@ def test_in_project_roots(tmpdir):
         (project_dir_inside_site_packages, True),
     ]
     for (check_path, find) in check[:]:
-        check.append((os.path.join(check_path, 'a.py'), find))
+        filename_inside = os.path.join(check_path, 'a.py')
+        with open(filename_inside, 'w') as stream:
+            # Note: on Github actions, tmpdir may be something as:
+            # c:\\users\\runner~1\\appdata\\local\\temp\\pytest-of-runneradmin\\pytest-0\\test_in_project_roots0
+            # internally this may be set as:
+            # c:\\users\\runneradmin\\appdata\\local\\temp\\pytest-of-runneradmin\\pytest-0\\test_in_project_roots0
+            # So, when getting the absolute path, `runner~1` will be properly expanded to `runneradmin` if the
+            # file exists, but if it doesn't it's not (which may make the test fail), so, make sure
+            # that we actually create the file so that things work as expected.
+            stream.write('...')
+        check.append((filename_inside, find))
 
     for check_path, find in check:
-        assert files_filtering.in_project_roots(check_path) == find
+        if files_filtering.in_project_roots(check_path) != find:
+            if find:
+                msg = 'Expected %s to be in the project roots.\nProject roots: %s\nLibrary roots: %s\n'
+            else:
+                msg = 'Expected %s NOT to be in the project roots.\nProject roots: %s\nLibrary roots: %s\n'
+
+            raise AssertionError(msg % (
+                check_path,
+                files_filtering._get_project_roots(),
+                files_filtering._get_library_roots(),
+                )
+            )
 
     files_filtering.set_project_roots([])
     files_filtering.set_library_roots([site_packages, site_packages_inside_project_dir])
@@ -50,12 +107,14 @@ def test_in_project_roots(tmpdir):
         (site_packages_inside_project_dir, False),
         (project_dir, True),
         (project_dir_inside_site_packages, False),
-        ('<foo>', True),
+        ('<foo>', False),
+        ('<ipython>', True),
         ('<frozen importlib._bootstrap>', False),
     ]
 
     for check_path, find in check:
-        assert files_filtering.in_project_roots(check_path) == find
+        assert files_filtering.in_project_roots(check_path) == find, \
+            'Expected: %s to be a part of the project: %s' % (check_path, find)
 
     sys.path.append(str(site_packages))
     try:
@@ -166,9 +225,6 @@ def test_rules_to_exclude_filter(tmpdir):
     with fileb.open('w') as stream:
         stream.write('')
 
-    def filename_to_server(filename):
-        return filename
-
     def on_error(msg):
         raise AssertionError(msg)
 
@@ -182,7 +238,7 @@ def test_rules_to_exclude_filter(tmpdir):
         {'module': 'bar.foo', 'include': True},
     ]
     shuffle(rules)
-    exclude_filters = _convert_rules_to_exclude_filters(rules, filename_to_server, on_error)
+    exclude_filters = _convert_rules_to_exclude_filters(rules, on_error)
     assert exclude_filters == [
         ExcludeFilter(name=str(fileb2), exclude=False, is_path=True),
         ExcludeFilter(name=str(fileb), exclude=False, is_path=True),

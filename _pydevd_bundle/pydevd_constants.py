@@ -4,6 +4,9 @@ This module holds the constants used for specifying the states of the debugger.
 from __future__ import nested_scopes
 import platform
 import weakref
+import struct
+import warnings
+import functools
 
 STATE_RUN = 1
 STATE_SUSPEND = 2
@@ -16,6 +19,12 @@ try:
     int_types = (int, long)
 except NameError:
     int_types = (int,)
+
+# types does not include a MethodWrapperType
+try:
+    MethodWrapperType = type([].__str__)
+except:
+    MethodWrapperType = None
 
 import sys  # Note: the sys import must be here anyways (others depend on it)
 
@@ -38,6 +47,23 @@ class DebugInfoHolder:
 
     PYDEVD_DEBUG_FILE = None
 
+
+# Any filename that starts with these strings is not traced nor shown to the user.
+# In Python 3.7 "<frozen ..." appears multiple times during import and should be ignored for the user.
+# In PyPy "<builtin> ..." can appear and should be ignored for the user.
+# <attrs is used internally by attrs
+# <__array_function__ is used by numpy
+IGNORE_BASENAMES_STARTING_WITH = ('<frozen ', '<builtin', '<attrs', '<__array_function__')
+
+# Note: <string> has special heuristics to know whether it should be traced or not (it's part of
+# user code when it's the <string> used in python -c and part of the library otherwise).
+
+# Any filename that starts with these strings is considered user (project) code. Note
+# that files for which we have a source mapping are also considered as a part of the project.
+USER_CODE_BASENAMES_STARTING_WITH = ('<ipython',)
+
+# Any filename that starts with these strings is considered library code (note: checked after USER_CODE_BASENAMES_STARTING_WITH).
+LIBRARY_CODE_BASENAMES_STARTING_WITH = ('<',)
 
 IS_CPYTHON = platform.python_implementation() == 'CPython'
 
@@ -64,6 +90,7 @@ except AttributeError:
 MAXIMUM_VARIABLE_REPRESENTATION_SIZE = 1000
 # Prefix for saving functions return values in locals
 RETURN_VALUES_DICT = '__pydevd_ret_val_dict'
+GENERATED_LEN_ATTR_NAME = 'len()'
 
 import os
 
@@ -90,33 +117,73 @@ if IS_JYTHON:
 USE_CUSTOM_SYS_CURRENT_FRAMES = not hasattr(sys, '_current_frames') or IS_PYPY
 USE_CUSTOM_SYS_CURRENT_FRAMES_MAP = USE_CUSTOM_SYS_CURRENT_FRAMES and (IS_PYPY or IS_IRONPYTHON)
 
+if USE_CUSTOM_SYS_CURRENT_FRAMES:
+
+    # Some versions of Jython don't have it (but we can provide a replacement)
+    if IS_JYTHON:
+        from java.lang import NoSuchFieldException
+        from org.python.core import ThreadStateMapping
+        try:
+            cachedThreadState = ThreadStateMapping.getDeclaredField('globalThreadStates')  # Dev version
+        except NoSuchFieldException:
+            cachedThreadState = ThreadStateMapping.getDeclaredField('cachedThreadState')  # Release Jython 2.7.0
+        cachedThreadState.accessible = True
+        thread_states = cachedThreadState.get(ThreadStateMapping)
+
+        def _current_frames():
+            as_array = thread_states.entrySet().toArray()
+            ret = {}
+            for thread_to_state in as_array:
+                thread = thread_to_state.getKey()
+                if thread is None:
+                    continue
+                thread_state = thread_to_state.getValue()
+                if thread_state is None:
+                    continue
+
+                frame = thread_state.frame
+                if frame is None:
+                    continue
+
+                ret[thread.getId()] = frame
+            return ret
+
+    elif USE_CUSTOM_SYS_CURRENT_FRAMES_MAP:
+        constructed_tid_to_last_frame = {}
+
+        # IronPython doesn't have it. Let's use our workaround...
+        def _current_frames():
+            return constructed_tid_to_last_frame
+
+    else:
+        raise RuntimeError('Unable to proceed (sys._current_frames not available in this Python implementation).')
+else:
+    _current_frames = sys._current_frames
+
 IS_PYTHON_STACKLESS = "stackless" in sys.version.lower()
 CYTHON_SUPPORTED = False
 
-try:
-    import platform
-    python_implementation = platform.python_implementation()
-except:
-    pass
-else:
-    if python_implementation == 'CPython' and not IS_PYTHON_STACKLESS:
-        # Only available for CPython!
-        if (
-            (sys.version_info[0] == 2 and sys.version_info[1] >= 6)
-            or (sys.version_info[0] == 3 and sys.version_info[1] >= 3)
-            or (sys.version_info[0] > 3)
-            ):
-            # Supported in 2.6,2.7 or 3.3 onwards (32 or 64)
-            CYTHON_SUPPORTED = True
+python_implementation = platform.python_implementation()
+if python_implementation == 'CPython' and not IS_PYTHON_STACKLESS:
+    # Only available for CPython!
+    if (
+        (sys.version_info[0] == 2 and sys.version_info[1] >= 6)
+        or (sys.version_info[0] == 3 and sys.version_info[1] >= 3)
+        or (sys.version_info[0] > 3)
+        ):
+        # Supported in 2.6,2.7 or 3.3 onwards (32 or 64)
+        CYTHON_SUPPORTED = True
 
 #=======================================================================================================================
 # Python 3?
 #=======================================================================================================================
 IS_PY3K = False
 IS_PY34_OR_GREATER = False
+IS_PY35_OR_GREATER = False
 IS_PY36_OR_GREATER = False
 IS_PY37_OR_GREATER = False
 IS_PY38_OR_GREATER = False
+IS_PY39_OR_GREATER = False
 IS_PY2 = True
 IS_PY27 = False
 IS_PY24 = False
@@ -125,9 +192,11 @@ try:
         IS_PY3K = True
         IS_PY2 = False
         IS_PY34_OR_GREATER = sys.version_info >= (3, 4)
+        IS_PY35_OR_GREATER = sys.version_info >= (3, 5)
         IS_PY36_OR_GREATER = sys.version_info >= (3, 6)
         IS_PY37_OR_GREATER = sys.version_info >= (3, 7)
         IS_PY38_OR_GREATER = sys.version_info >= (3, 8)
+        IS_PY39_OR_GREATER = sys.version_info >= (3, 9)
     elif sys.version_info[0] == 2 and sys.version_info[1] == 7:
         IS_PY27 = True
     elif sys.version_info[0] == 2 and sys.version_info[1] == 4:
@@ -151,27 +220,104 @@ try:
 except AttributeError:
     PY_IMPL_NAME = ''
 
-try:
-    SUPPORT_GEVENT = os.getenv('GEVENT_SUPPORT', 'False') == 'True'
-except:
-    # Jython 2.1 doesn't accept that construct
-    SUPPORT_GEVENT = False
+ENV_TRUE_LOWER_VALUES = ('yes', 'true', '1')
+ENV_FALSE_LOWER_VALUES = ('no', 'false', '0')
 
-# At the moment gevent supports Python >= 2.6 and Python >= 3.3
-USE_LIB_COPY = SUPPORT_GEVENT and \
-               ((not IS_PY3K and sys.version_info[1] >= 6) or
-                (IS_PY3K and sys.version_info[1] >= 3))
+
+def is_true_in_env(env_key):
+    if isinstance(env_key, tuple):
+        # If a tuple, return True if any of those ends up being true.
+        for v in env_key:
+            if is_true_in_env(v):
+                return True
+        return False
+    else:
+        return os.getenv(env_key, '').lower() in ENV_TRUE_LOWER_VALUES
+
+
+def as_float_in_env(env_key, default):
+    value = os.getenv(env_key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        raise RuntimeError(
+            'Error: expected the env variable: %s to be set to a float value. Found: %s' % (
+                env_key, value))
+
+
+# If true in env, use gevent mode.
+SUPPORT_GEVENT = is_true_in_env('GEVENT_SUPPORT')
+
+GEVENT_SUPPORT_NOT_SET_MSG = os.getenv(
+    'GEVENT_SUPPORT_NOT_SET_MSG',
+    'It seems that the gevent monkey-patching is being used.\n'
+    'Please set an environment variable with:\n'
+    'GEVENT_SUPPORT=True\n'
+    'to enable gevent support in the debugger.'
+)
+
+USE_LIB_COPY = SUPPORT_GEVENT
 
 INTERACTIVE_MODE_AVAILABLE = sys.platform in ('darwin', 'win32') or os.getenv('DISPLAY') is not None
 
-SHOW_COMPILE_CYTHON_COMMAND_LINE = os.getenv('PYDEVD_SHOW_COMPILE_CYTHON_COMMAND_LINE', 'False') == 'True'
+# If true in env, forces cython to be used (raises error if not available).
+# If false in env, disables it.
+# If not specified, uses default heuristic to determine if it should be loaded.
+USE_CYTHON_FLAG = os.getenv('PYDEVD_USE_CYTHON')
 
-LOAD_VALUES_ASYNC = os.getenv('PYDEVD_LOAD_VALUES_ASYNC', 'False') == 'True'
+# Use to disable loading the lib to set tracing to all threads (default is using heuristics based on where we're running).
+LOAD_NATIVE_LIB_FLAG = os.getenv('PYDEVD_LOAD_NATIVE_LIB', '').lower()
+
+if USE_CYTHON_FLAG is not None:
+    USE_CYTHON_FLAG = USE_CYTHON_FLAG.lower()
+    if USE_CYTHON_FLAG not in ENV_TRUE_LOWER_VALUES and USE_CYTHON_FLAG not in ENV_FALSE_LOWER_VALUES:
+        raise RuntimeError('Unexpected value for PYDEVD_USE_CYTHON: %s (enable with one of: %s, disable with one of: %s)' % (
+            USE_CYTHON_FLAG, ENV_TRUE_LOWER_VALUES, ENV_FALSE_LOWER_VALUES))
+
+else:
+    if not CYTHON_SUPPORTED:
+        USE_CYTHON_FLAG = 'no'
+
+SHOW_COMPILE_CYTHON_COMMAND_LINE = is_true_in_env('PYDEVD_SHOW_COMPILE_CYTHON_COMMAND_LINE')
+
+LOAD_VALUES_ASYNC = is_true_in_env('PYDEVD_LOAD_VALUES_ASYNC')
 DEFAULT_VALUE = "__pydevd_value_async"
 ASYNC_EVAL_TIMEOUT_SEC = 60
 NEXT_VALUE_SEPARATOR = "__pydev_val__"
 BUILTINS_MODULE_NAME = '__builtin__' if IS_PY2 else 'builtins'
-SHOW_DEBUG_INFO_ENV = os.getenv('PYCHARM_DEBUG') == 'True' or os.getenv('PYDEV_DEBUG') == 'True' or os.getenv('PYDEVD_DEBUG') == 'True'
+SHOW_DEBUG_INFO_ENV = is_true_in_env(('PYCHARM_DEBUG', 'PYDEV_DEBUG', 'PYDEVD_DEBUG'))
+
+# This timeout is used to track the time to send a message saying that the evaluation
+# is taking too long and possible mitigations.
+PYDEVD_WARN_EVALUATION_TIMEOUT = as_float_in_env('PYDEVD_WARN_EVALUATION_TIMEOUT', 3.)
+
+# If True in env shows a thread dump when the evaluation times out.
+PYDEVD_THREAD_DUMP_ON_WARN_EVALUATION_TIMEOUT = is_true_in_env('PYDEVD_THREAD_DUMP_ON_WARN_EVALUATION_TIMEOUT')
+
+# This timeout is used only when the mode that all threads are stopped/resumed at once is used
+# (i.e.: multi_threads_single_notification)
+#
+# In this mode, if some evaluation doesn't finish until this timeout, we notify the user
+# and then resume all threads until the evaluation finishes.
+#
+# A negative value will disable the timeout and a value of 0 will automatically run all threads
+# (without any notification) when the evaluation is started and pause all threads when the
+# evaluation is finished. A positive value will run run all threads after the timeout
+# elapses.
+PYDEVD_UNBLOCK_THREADS_TIMEOUT = as_float_in_env('PYDEVD_UNBLOCK_THREADS_TIMEOUT', -1.)
+
+# Timeout to interrupt a thread (so, if some evaluation doesn't finish until this
+# timeout, the thread doing the evaluation is interrupted).
+# A value <= 0 means this is disabled.
+# See: _pydevd_bundle.pydevd_timeout.create_interrupt_this_thread_callback for details
+# on how the thread interruption works (there are some caveats related to it).
+PYDEVD_INTERRUPT_THREAD_TIMEOUT = as_float_in_env('PYDEVD_INTERRUPT_THREAD_TIMEOUT', -1)
+
+EXCEPTION_TYPE_UNHANDLED = 'UNHANDLED'
+EXCEPTION_TYPE_USER_UNHANDLED = 'USER_UNHANDLED'
+EXCEPTION_TYPE_HANDLED = 'HANDLED'
 
 if SHOW_DEBUG_INFO_ENV:
     # show debug info before the debugger start
@@ -308,6 +454,10 @@ if IS_PY3K:
     def dict_items(d):
         return list(d.items())
 
+    def as_str(s):
+        assert isinstance(s, str)
+        return s
+
 else:
     dict_keys = None
     try:
@@ -345,6 +495,38 @@ else:
 
     def dict_items(d):
         return d.items()
+
+    def as_str(s):
+        if isinstance(s, unicode):
+            return s.encode('utf-8')
+        return s
+
+
+def silence_warnings_decorator(func):
+
+    @functools.wraps(func)
+    def new_func(*args, **kwargs):
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            return func(*args, **kwargs)
+
+    return new_func
+
+
+def sorted_dict_repr(d):
+    s = sorted(dict_iter_items(d), key=lambda x:str(x[0]))
+    return '{' + ', '.join(('%r: %r' % x) for x in s) + '}'
+
+
+def iter_chars(b):
+    # In Python 2, we can iterate bytes or unicode with individual characters, but Python 3 onwards
+    # changed that behavior so that when iterating bytes we actually get ints!
+    if not IS_PY2:
+        if isinstance(b, bytes):
+            # i.e.: do something as struct.unpack('3c', b)
+            return iter(struct.unpack(str(len(b)) + 'c', b))
+    return iter(b)
+
 
 try:
     xrange = xrange
@@ -603,6 +785,8 @@ ARGUMENT_JSON_PROTOCOL = 'json-dap'
 # payload is json
 HTTP_JSON_PROTOCOL = 'http_json'
 ARGUMENT_HTTP_JSON_PROTOCOL = 'json-dap-http'
+
+ARGUMENT_PPID = 'ppid'
 
 
 class _GlobalSettings:

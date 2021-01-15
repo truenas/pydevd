@@ -15,7 +15,7 @@ from _pydevd_bundle._debug_adapter.pydevd_schema import (
     ProcessEvent, Scope, ScopesResponseBody, SetExpressionResponseBody,
     SetVariableResponseBody, SourceBreakpoint, SourceResponseBody,
     VariablesResponseBody, SetBreakpointsResponseBody, Response,
-    Capabilities, PydevdAuthorizeRequest)
+    Capabilities, PydevdAuthorizeRequest, Request)
 from _pydevd_bundle.pydevd_api import PyDevdAPI
 from _pydevd_bundle.pydevd_breakpoints import get_exception_class
 from _pydevd_bundle.pydevd_comm_constants import (
@@ -25,14 +25,14 @@ from _pydevd_bundle.pydevd_comm_constants import (
 from _pydevd_bundle.pydevd_filtering import ExcludeFilter
 from _pydevd_bundle.pydevd_json_debug_options import _extract_debug_options, DebugOptions
 from _pydevd_bundle.pydevd_net_command import NetCommand
-from _pydevd_bundle.pydevd_utils import convert_dap_log_message_to_expression
+from _pydevd_bundle.pydevd_utils import convert_dap_log_message_to_expression, ScopeRequest
 from _pydevd_bundle.pydevd_constants import (PY_IMPL_NAME, DebugInfoHolder, PY_VERSION_STR,
     PY_IMPL_VERSION_STR, IS_64BIT_PROCESS)
 from _pydevd_bundle.pydevd_trace_dispatch import USING_CYTHON
 from _pydevd_frame_eval.pydevd_frame_eval_main import USING_FRAME_EVAL
 
 
-def _convert_rules_to_exclude_filters(rules, filename_to_server, on_error):
+def _convert_rules_to_exclude_filters(rules, on_error):
     exclude_filters = []
     if not isinstance(rules, list):
         on_error('Invalid "rules" (expected list of dicts). Found: %s' % (rules,))
@@ -61,8 +61,6 @@ def _convert_rules_to_exclude_filters(rules, filename_to_server, on_error):
             if path is not None:
                 glob_pattern = path
                 if '*' not in path and '?' not in path:
-                    path = filename_to_server(path)
-
                     if os.path.isdir(glob_pattern):
                         # If a directory was specified, add a '/**'
                         # to be consistent with the glob pattern required
@@ -130,14 +128,25 @@ class PyDevJsonCommandProcessor(object):
         DEBUG = False
 
         try:
+            if isinstance(json_contents, bytes):
+                json_contents = json_contents.decode('utf-8')
+
             request = self.from_json(json_contents, update_ids_from_dap=True)
-        except KeyError as e:
-            request = self.from_json(json_contents, update_ids_from_dap=False)
+        except Exception as e:
+            try:
+                loaded_json = json.loads(json_contents)
+                request = Request(loaded_json.get('command', '<unknown>'), loaded_json['seq'])
+            except:
+                # There's not much we can do in this case...
+                pydev_log.exception('Error loading json: %s', json_contents)
+                return
+
             error_msg = str(e)
             if error_msg.startswith("'") and error_msg.endswith("'"):
                 error_msg = error_msg[1:-1]
 
-            # This means a failure updating ids from the DAP (the client sent a key we didn't send).
+            # This means a failure processing the request (but we were able to load the seq,
+            # so, answer with a failure response).
             def on_request(py_db, request):
                 error_response = {
                     'type': 'response',
@@ -151,7 +160,7 @@ class PyDevJsonCommandProcessor(object):
         else:
             if DebugInfoHolder.DEBUG_RECORD_SOCKET_READS and DebugInfoHolder.DEBUG_TRACE_LEVEL >= 1:
                 pydev_log.info('Process %s: %s\n' % (
-                    request.__class__.__name__, json.dumps(request.to_dict(), indent=4, sort_keys=True),))
+                    request.__class__.__name__, json.dumps(request.to_dict(update_ids_to_dap=True), indent=4, sort_keys=True),))
 
             assert request.type == 'request'
             method_name = 'on_%s_request' % (request.command.lower(),)
@@ -208,10 +217,12 @@ class PyDevJsonCommandProcessor(object):
             supportsLogPoints=True,
             supportsSetExpression=True,
             supportsTerminateRequest=True,
+            supportsClipboardContext=True,
 
             exceptionBreakpointFilters=[
                 {'filter': 'raised', 'label': 'Raised Exceptions', 'default': False},
                 {'filter': 'uncaught', 'label': 'Uncaught Exceptions', 'default': True},
+                {"filter": "userUnhandled", "label": "User Uncaught Exceptions", "default": False},
             ],
 
             # Not supported.
@@ -317,11 +328,38 @@ class PyDevJsonCommandProcessor(object):
         terminate_child_processes = args.get('terminateChildProcesses', True)
         self.api.set_terminate_child_processes(py_db, terminate_child_processes)
 
+        variable_presentation = args.get('variablePresentation', None)
+        if isinstance(variable_presentation, dict):
+
+            def get_variable_presentation(setting, default):
+                value = variable_presentation.get(setting, default)
+                if value not in ('group', 'inline', 'hide'):
+                    pydev_log.info(
+                        'The value set for "%s" (%s) in the variablePresentation is not valid. Valid values are: "group", "inline", "hide"' % (
+                            setting, value,))
+                    value = default
+
+                return value
+
+            default = get_variable_presentation('all', 'group')
+
+            special_presentation = get_variable_presentation('special', default)
+            function_presentation = get_variable_presentation('function', default)
+            class_presentation = get_variable_presentation('class', default)
+            protected_presentation = get_variable_presentation('protected', default)
+
+            self.api.set_variable_presentation(py_db, self.api.VariablePresentation(
+                special_presentation,
+                function_presentation,
+                class_presentation,
+                protected_presentation
+            ))
+
         exclude_filters = []
 
         if rules is not None:
             exclude_filters = _convert_rules_to_exclude_filters(
-                rules, self.api.filename_to_server, lambda msg: self.api.send_error_message(py_db, msg))
+                rules, lambda msg: self.api.send_error_message(py_db, msg))
 
         self.api.set_exclude_filters(py_db, exclude_filters)
 
@@ -332,7 +370,7 @@ class PyDevJsonCommandProcessor(object):
         self._options.update_fom_debug_options(debug_options)
         self._options.update_from_args(args)
 
-        self.api.set_use_libraries_filter(py_db, not self._options.debug_stdlib)
+        self.api.set_use_libraries_filter(py_db, self._options.just_my_code)
 
         path_mappings = []
         for pathMapping in args.get('pathMappings', []):
@@ -353,7 +391,7 @@ class PyDevJsonCommandProcessor(object):
         self.api.set_show_return_values(py_db, self._options.show_return_value)
 
         if not self._options.break_system_exit_zero:
-            ignore_system_exit_codes = [0]
+            ignore_system_exit_codes = [0, None]
             if self._options.django_debug:
                 ignore_system_exit_codes += [3]
 
@@ -363,8 +401,9 @@ class PyDevJsonCommandProcessor(object):
             self.api.stop_on_entry()
 
     def _send_process_event(self, py_db, start_method):
-        if len(sys.argv) > 0:
-            name = sys.argv[0]
+        argv = getattr(sys, 'argv', [])
+        if len(argv) > 0:
+            name = argv[0]
         else:
             name = ''
 
@@ -628,17 +667,28 @@ class PyDevJsonCommandProcessor(object):
         ignore_libraries = 1 if py_db.get_use_libraries_filter() else 0
 
         if exception_options:
-            break_raised = True
-            break_uncaught = True
+            break_raised = False
+            break_uncaught = False
 
             for option in exception_options:
                 option = ExceptionOptions(**option)
                 if not option.path:
                     continue
 
+                # never: never breaks
+                #
+                # always: always breaks
+                #
+                # unhandled: breaks when exception unhandled
+                #
+                # userUnhandled: breaks if the exception is not handled by user code
+
                 notify_on_handled_exceptions = 1 if option.breakMode == 'always' else 0
-                notify_on_unhandled_exceptions = 1 if option.breakMode in ('unhandled', 'userUnhandled') else 0
+                notify_on_unhandled_exceptions = 1 if option.breakMode == 'unhandled' else 0
+                notify_on_user_unhandled_exceptions = 1 if option.breakMode == 'userUnhandled' else 0
                 exception_paths = option.path
+                break_raised |= notify_on_handled_exceptions
+                break_uncaught |= notify_on_unhandled_exceptions
 
                 exception_names = []
                 if len(exception_paths) == 0:
@@ -663,6 +713,7 @@ class PyDevJsonCommandProcessor(object):
                         expression,
                         notify_on_handled_exceptions,
                         notify_on_unhandled_exceptions,
+                        notify_on_user_unhandled_exceptions,
                         notify_on_first_raise_only,
                         ignore_libraries
                     )
@@ -670,9 +721,11 @@ class PyDevJsonCommandProcessor(object):
         else:
             break_raised = 'raised' in filters
             break_uncaught = 'uncaught' in filters
-            if break_raised or break_uncaught:
+            break_user = 'userUnhandled' in filters
+            if break_raised or break_uncaught or break_user:
                 notify_on_handled_exceptions = 1 if break_raised else 0
                 notify_on_unhandled_exceptions = 1 if break_uncaught else 0
+                notify_on_user_unhandled_exceptions = 1 if break_user else 0
                 exception = 'BaseException'
 
                 self.api.add_python_exception_breakpoint(
@@ -682,11 +735,12 @@ class PyDevJsonCommandProcessor(object):
                     expression,
                     notify_on_handled_exceptions,
                     notify_on_unhandled_exceptions,
+                    notify_on_user_unhandled_exceptions,
                     notify_on_first_raise_only,
                     ignore_libraries
                 )
 
-        if break_raised or break_uncaught:
+        if break_raised:
             btype = None
             if self._options.django_debug:
                 btype = 'django'
@@ -736,7 +790,10 @@ class PyDevJsonCommandProcessor(object):
         frame_id = request.arguments.frameId
 
         variables_reference = frame_id
-        scopes = [Scope('Locals', int(variables_reference), False).to_dict()]
+        scopes = [
+            Scope('Locals', ScopeRequest(int(variables_reference), 'locals'), False, presentationHint='locals'),
+            Scope('Globals', ScopeRequest(int(variables_reference), 'globals'), False),
+        ]
         body = ScopesResponseBody(scopes)
         scopes_response = pydevd_base_schema.build_response(request, kwargs={'body': body})
         return NetCommand(CMD_RETURN, 0, scopes_response, is_json=True)
@@ -806,6 +863,9 @@ class PyDevJsonCommandProcessor(object):
         arguments = request.arguments  # : :type arguments: VariablesArguments
         variables_reference = arguments.variablesReference
 
+        if isinstance(variables_reference, ScopeRequest):
+            variables_reference = variables_reference.variable_reference
+
         thread_id = py_db.suspended_frames_manager.get_thread_id_for_variable_reference(
             variables_reference)
         if thread_id is not None:
@@ -823,6 +883,9 @@ class PyDevJsonCommandProcessor(object):
     def on_setvariable_request(self, py_db, request):
         arguments = request.arguments  # : :type arguments: SetVariableArguments
         variables_reference = arguments.variablesReference
+
+        if isinstance(variables_reference, ScopeRequest):
+            variables_reference = variables_reference.variable_reference
 
         if arguments.name.startswith('(return) '):
             response = pydevd_base_schema.build_response(
@@ -866,6 +929,9 @@ class PyDevJsonCommandProcessor(object):
 
         if source_reference != 0:
             server_filename = pydevd_file_utils.get_server_filename_from_source_reference(source_reference)
+            if not server_filename:
+                server_filename = pydevd_file_utils.get_source_reference_filename_from_linecache(source_reference)
+
             if server_filename:
                 # Try direct file access first - it's much faster when available.
                 try:
@@ -884,6 +950,16 @@ class PyDevJsonCommandProcessor(object):
                     # If we didn't get at least one line back, reset it to None so that it's
                     # reported as error below, and not as an empty file.
                     content = ''.join(lines) or None
+
+            if content is None:
+                frame_id = pydevd_file_utils.get_frame_id_from_source_reference(source_reference)
+                pydev_log.debug('Found frame id: %s for source reference: %s', frame_id, source_reference)
+                if frame_id is not None:
+                    try:
+                        content = self.api.get_decompiled_source_from_frame_id(py_db, frame_id)
+                    except Exception:
+                        pydev_log.exception('Error getting source for frame id: %s', frame_id)
+                        content = None
 
         body = SourceResponseBody(content or '')
         response_args = {'body': body}
@@ -972,7 +1048,12 @@ class PyDevJsonCommandProcessor(object):
         except AttributeError:
             pid = None
 
-        ppid = self.api.get_ppid()
+        # It's possible to have the ppid reported from args. In this case, use that instead of the
+        # real ppid (athough we're using `ppid`, what we want in meaning is the `launcher_pid` --
+        # so, if a python process is launched from another python process, consider that process the
+        # parent and not any intermediary stubs).
+
+        ppid = py_db.get_arg_ppid() or self.api.get_ppid()
 
         try:
             impl_desc = platform.python_implementation()

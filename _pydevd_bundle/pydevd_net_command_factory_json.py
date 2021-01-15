@@ -14,15 +14,22 @@ from _pydevd_bundle.pydevd_comm_constants import CMD_THREAD_CREATE, CMD_RETURN, 
     CMD_STEP_RETURN, CMD_STEP_CAUGHT_EXCEPTION, CMD_ADD_EXCEPTION_BREAK, CMD_SET_BREAK, \
     CMD_SET_NEXT_STATEMENT, CMD_THREAD_SUSPEND_SINGLE_NOTIFICATION, \
     CMD_THREAD_RESUME_SINGLE_NOTIFICATION, CMD_THREAD_KILL, CMD_STOP_ON_START, CMD_INPUT_REQUESTED, \
-    CMD_EXIT, CMD_STEP_INTO_COROUTINE, constant_to_str, CMD_STEP_RETURN_MY_CODE
+    CMD_EXIT, CMD_STEP_INTO_COROUTINE, CMD_STEP_RETURN_MY_CODE
 from _pydevd_bundle.pydevd_constants import get_thread_id, dict_values, ForkSafeLock
 from _pydevd_bundle.pydevd_net_command import NetCommand, NULL_NET_COMMAND
 from _pydevd_bundle.pydevd_net_command_factory_xml import NetCommandFactory
 from _pydevd_bundle.pydevd_utils import get_non_pydevd_threads
 import pydevd_file_utils
-from _pydevd_bundle.pydevd_comm import build_exception_info_response, pydevd_find_thread_by_id
+from _pydevd_bundle.pydevd_comm import build_exception_info_response
 from _pydevd_bundle.pydevd_additional_thread_info import set_additional_thread_info
-from _pydevd_bundle import pydevd_frame_utils
+from _pydevd_bundle import pydevd_frame_utils, pydevd_constants, pydevd_utils
+import linecache
+from _pydevd_bundle.pydevd_thread_lifecycle import pydevd_find_thread_by_id
+
+try:
+    from StringIO import StringIO
+except:
+    from io import StringIO
 
 
 class ModulesManager(object):
@@ -196,46 +203,62 @@ class NetCommandFactoryJson(NetCommandFactory):
     def make_get_thread_stack_message(self, py_db, seq, thread_id, topmost_frame, fmt, must_be_suspended=False, start_frame=0, levels=0):
         frames = []
         module_events = []
-        if topmost_frame is not None:
-            try:
-                # : :type suspended_frames_manager: SuspendedFramesManager
-                suspended_frames_manager = py_db.suspended_frames_manager
-                frames_list = suspended_frames_manager.get_frames_list(thread_id)
-                if frames_list is None:
-                    # Could not find stack of suspended frame...
-                    if must_be_suspended:
-                        return None
+
+        try:
+            # : :type suspended_frames_manager: SuspendedFramesManager
+            suspended_frames_manager = py_db.suspended_frames_manager
+            frames_list = suspended_frames_manager.get_frames_list(thread_id)
+            if frames_list is None:
+                # Could not find stack of suspended frame...
+                if must_be_suspended:
+                    return None
+                else:
+                    frames_list = pydevd_frame_utils.create_frames_list_from_frame(topmost_frame)
+
+            for frame_id, frame, method_name, original_filename, filename_in_utf8, lineno, applied_mapping, show_as_current_frame in self._iter_visible_frames_info(
+                    py_db, frames_list
+                ):
+
+                try:
+                    module_name = str(frame.f_globals.get('__name__', ''))
+                except:
+                    module_name = '<unknown>'
+
+                module_events.extend(self.modules_manager.track_module(filename_in_utf8, module_name, frame))
+
+                presentation_hint = None
+                if not getattr(frame, 'IS_PLUGIN_FRAME', False):  # Never filter out plugin frames!
+                    if py_db.is_files_filter_enabled and py_db.apply_files_filter(frame, original_filename, False):
+                        continue
+
+                    if not py_db.in_project_scope(frame):
+                        presentation_hint = 'subtle'
+
+                formatted_name = self._format_frame_name(fmt, method_name, module_name, lineno, filename_in_utf8)
+                if show_as_current_frame:
+                    formatted_name += ' (Current frame)'
+                source_reference = pydevd_file_utils.get_client_filename_source_reference(filename_in_utf8)
+
+                if not source_reference and not applied_mapping and not os.path.exists(original_filename):
+                    if getattr(frame.f_code, 'co_lnotab', None):
+                        # Create a source-reference to be used where we provide the source by decompiling the code.
+                        # Note: When the time comes to retrieve the source reference in this case, we'll
+                        # check the linecache first (see: get_decompiled_source_from_frame_id).
+                        source_reference = pydevd_file_utils.create_source_reference_for_frame_id(frame_id, original_filename)
                     else:
-                        frames_list = pydevd_frame_utils.create_frames_list_from_frame(topmost_frame)
+                        # Check if someone added a source reference to the linecache (Python attrs does this).
+                        if linecache.getline(original_filename, 1):
+                            source_reference = pydevd_file_utils.create_source_reference_for_linecache(
+                                original_filename)
 
-                for frame_id, frame, method_name, original_filename, filename_in_utf8, lineno in self._iter_visible_frames_info(
-                        py_db, frames_list
-                    ):
-
-                    try:
-                        module_name = str(frame.f_globals.get('__name__', ''))
-                    except:
-                        module_name = '<unknown>'
-
-                    module_events.extend(self.modules_manager.track_module(filename_in_utf8, module_name, frame))
-
-                    presentation_hint = None
-                    if not getattr(frame, 'IS_PLUGIN_FRAME', False):  # Never filter out plugin frames!
-                        if py_db.is_files_filter_enabled and py_db.apply_files_filter(frame, original_filename, False):
-                            continue
-
-                        if not py_db.in_project_scope(frame):
-                            presentation_hint = 'subtle'
-
-                    formatted_name = self._format_frame_name(fmt, method_name, module_name, lineno, filename_in_utf8)
-                    frames.append(pydevd_schema.StackFrame(
-                        frame_id, formatted_name, lineno, column=1, source={
-                            'path': filename_in_utf8,
-                            'sourceReference': pydevd_file_utils.get_client_filename_source_reference(filename_in_utf8),
-                        },
-                        presentationHint=presentation_hint).to_dict())
-            finally:
-                topmost_frame = None
+                frames.append(pydevd_schema.StackFrame(
+                    frame_id, formatted_name, lineno, column=1, source={
+                        'path': filename_in_utf8,
+                        'sourceReference': source_reference,
+                    },
+                    presentationHint=presentation_hint).to_dict())
+        finally:
+            topmost_frame = None
 
         for module_event in module_events:
             py_db.writer.add_command(module_event)
@@ -254,10 +277,17 @@ class NetCommandFactoryJson(NetCommandFactory):
             body=pydevd_schema.StackTraceResponseBody(stackFrames=stack_frames, totalFrames=total_frames))
         return NetCommand(CMD_RETURN, 0, response, is_json=True)
 
+    @overrides(NetCommandFactory.make_warning_message)
+    def make_warning_message(self, msg):
+        category = 'console'
+        body = OutputEventBody(msg, category)
+        event = OutputEvent(body)
+        return NetCommand(CMD_WRITE_TO_CONSOLE, 0, event, is_json=True)
+
     @overrides(NetCommandFactory.make_io_message)
-    def make_io_message(self, v, ctx):
+    def make_io_message(self, msg, ctx):
         category = 'stdout' if int(ctx) == 1 else 'stderr'
-        body = OutputEventBody(v, category)
+        body = OutputEventBody(msg, category)
         event = OutputEvent(body)
         return NetCommand(CMD_WRITE_TO_CONSOLE, 0, event, is_json=True)
 
@@ -371,10 +401,37 @@ class NetCommandFactoryJson(NetCommandFactory):
         if py_db.get_use_libraries_filter():
             msg += ('\nNote: may have been skipped because of "justMyCode" option (default == true). '
                     'Try setting \"justMyCode\": false in the debug configuration (e.g., launch.json).\n')
+        return self.make_warning_message(msg)
 
-        body = OutputEventBody(msg, category='console')
-        event = OutputEvent(body)
-        return NetCommand(CMD_WRITE_TO_CONSOLE, 0, event, is_json=True)
+    @overrides(NetCommandFactory.make_evaluation_timeout_msg)
+    def make_evaluation_timeout_msg(self, py_db, expression, curr_thread):
+        msg = '''Evaluating: %s did not finish after %.2f seconds.
+This may mean a number of things:
+- This evaluation is really slow and this is expected.
+    In this case it's possible to silence this error by raising the timeout, setting the
+    PYDEVD_WARN_EVALUATION_TIMEOUT environment variable to a bigger value.
+
+- The evaluation may need other threads running while it's running:
+    In this case, it's possible to set the PYDEVD_UNBLOCK_THREADS_TIMEOUT
+    environment variable so that if after a given timeout an evaluation doesn't finish,
+    other threads are unblocked or you can manually resume all threads.
+
+    Alternatively, it's also possible to skip breaking on a particular thread by setting a
+    `pydev_do_not_trace = True` attribute in the related threading.Thread instance
+    (if some thread should always be running and no breakpoints are expected to be hit in it).
+
+- The evaluation is deadlocked:
+    In this case you may set the PYDEVD_THREAD_DUMP_ON_WARN_EVALUATION_TIMEOUT
+    environment variable to true so that a thread dump is shown along with this message and
+    optionally, set the PYDEVD_INTERRUPT_THREAD_TIMEOUT to some value so that the debugger
+    tries to interrupt the evaluation (if possible) when this happens.
+''' % (expression, pydevd_constants.PYDEVD_WARN_EVALUATION_TIMEOUT)
+
+        if pydevd_constants.PYDEVD_THREAD_DUMP_ON_WARN_EVALUATION_TIMEOUT:
+            stream = StringIO()
+            pydevd_utils.dump_threads(stream, show_pydevd_threads=False)
+            msg += '\n\n%s\n' % stream.getvalue()
+        return self.make_warning_message(msg)
 
     @overrides(NetCommandFactory.make_exit_command)
     def make_exit_command(self, py_db):
